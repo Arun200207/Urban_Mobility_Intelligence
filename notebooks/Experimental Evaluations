@@ -1,0 +1,970 @@
+```python
+# ============================================================
+# MODULE 07 — EXPERIMENTATION & EVALUATION
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+#
+# Purpose:
+#   Benchmark traffic-signal control strategies in SUMO using
+#   consistent network-level traffic metrics.
+#
+# Policies evaluated:
+#   1. Fixed-time baseline
+#   2. Cyclic phase-control baseline
+#   3. Decentralized multi-agent queue-based heuristic
+#
+# Evaluation metrics:
+#   - Average queue
+#   - Maximum queue
+#   - Average waiting time
+#   - Maximum waiting time
+#   - Average vehicles
+#   - Peak vehicles
+#
+# Experimental setup:
+#   - SUMO
+#   - 2 x 2 intersection grid
+#   - 1000 simulation steps
+#   - Random seed = 42
+#   - Decision interval = 10 simulation steps
+#
+# IMPORTANT:
+#   The multi-agent policy is a heuristic controller.
+#   It is NOT a trained MARL/PPO policy.
+#
+# Research role:
+#   Provides a reproducible benchmark for comparing the current
+#   control strategies before introducing learned MARL policies.
+#
+# ============================================================
+
+
+# ============================================================
+# 1. IMPORTS & CONFIGURATION
+# ============================================================
+
+import os
+import sys
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+# ------------------------------------------------------------
+# Project paths
+# ------------------------------------------------------------
+
+if "PROJECT_DIR" in globals():
+    PROJECT_DIR = Path(PROJECT_DIR)
+else:
+    PROJECT_DIR = Path(
+        "/content/drive/MyDrive/Urban_Mobility_Project"
+    )
+
+SUMO_DIR = PROJECT_DIR / "sumo"
+CONFIG_FILE = SUMO_DIR / "simulation.sumocfg"
+RESULTS_DIR = PROJECT_DIR / "results"
+
+
+# ------------------------------------------------------------
+# Experiment configuration
+# ------------------------------------------------------------
+
+SIM_STEPS = 1000
+RANDOM_SEED = 42
+DECISION_INTERVAL = 10
+
+POLICY_NAMES = [
+    "fixed_time",
+    "cyclic",
+    "multi_agent_heuristic",
+]
+
+
+print("MODULE 07 — EXPERIMENTATION & EVALUATION")
+print("-" * 60)
+print("Project directory :", PROJECT_DIR)
+print("SUMO directory    :", SUMO_DIR)
+print("Simulation config :", CONFIG_FILE)
+print("Simulation steps  :", SIM_STEPS)
+print("Random seed       :", RANDOM_SEED)
+print("Decision interval :", DECISION_INTERVAL)
+
+
+# ============================================================
+# 2. ENVIRONMENT VALIDATION
+# ============================================================
+
+if not SUMO_DIR.exists():
+    raise FileNotFoundError(
+        f"SUMO directory not found: {SUMO_DIR}"
+    )
+
+if not CONFIG_FILE.exists():
+    raise FileNotFoundError(
+        f"SUMO configuration file not found: {CONFIG_FILE}"
+    )
+
+if shutil.which("sumo") is None:
+    raise FileNotFoundError(
+        "SUMO executable was not found in PATH."
+    )
+
+
+# ------------------------------------------------------------
+# Configure SUMO Python tools
+# ------------------------------------------------------------
+
+SUMO_HOME = os.environ.get(
+    "SUMO_HOME",
+    "/usr/share/sumo"
+)
+
+if Path(SUMO_HOME).exists():
+
+    SUMO_TOOLS = Path(SUMO_HOME) / "tools"
+
+    if str(SUMO_TOOLS) not in sys.path:
+        sys.path.append(str(SUMO_TOOLS))
+
+
+# ------------------------------------------------------------
+# Import TraCI
+# ------------------------------------------------------------
+
+try:
+    import traci
+except ImportError as exc:
+    raise ImportError(
+        "TraCI could not be imported. "
+        "Verify that SUMO and its Python tools are installed."
+    ) from exc
+
+
+# ============================================================
+# 3. NETWORK METRICS
+# ============================================================
+
+def get_network_metrics():
+    """
+    Collect network-level traffic metrics from SUMO.
+
+    Returns
+    -------
+    tuple
+        total_queue:
+            Total halted vehicles across all lanes.
+
+        total_waiting:
+            Total lane waiting time reported by SUMO.
+
+        vehicles:
+            Number of vehicles currently present in the network.
+    """
+
+    total_queue = 0.0
+    total_waiting = 0.0
+
+    for lane_id in traci.lane.getIDList():
+
+        total_queue += (
+            traci.lane.getLastStepHaltingNumber(
+                lane_id
+            )
+        )
+
+        total_waiting += (
+            traci.lane.getWaitingTime(
+                lane_id
+            )
+        )
+
+    vehicles = traci.vehicle.getIDCount()
+
+    return (
+        float(total_queue),
+        float(total_waiting),
+        int(vehicles),
+    )
+
+
+# ============================================================
+# 4. SIGNAL-PHASE QUEUE ESTIMATION
+# ============================================================
+
+def get_phase_queue(tls_id, phase_index):
+    """
+    Estimate the queue associated with green movements of a
+    traffic-signal phase.
+
+    Parameters
+    ----------
+    tls_id : str
+        SUMO traffic-light identifier.
+
+    phase_index : int
+        Signal phase index.
+
+    Returns
+    -------
+    float
+        Estimated queue served by the selected phase.
+    """
+
+    program_logics = (
+        traci.trafficlight.getAllProgramLogics(
+            tls_id
+        )
+    )
+
+    if len(program_logics) == 0:
+        raise RuntimeError(
+            f"No signal program found for '{tls_id}'."
+        )
+
+    logic = program_logics[0]
+    phases = logic.getPhases()
+
+    if phase_index < 0 or phase_index >= len(phases):
+        raise ValueError(
+            f"Invalid phase {phase_index} for '{tls_id}'."
+        )
+
+    phase = phases[phase_index]
+
+    controlled_links = (
+        traci.trafficlight.getControlledLinks(
+            tls_id
+        )
+    )
+
+    queue = 0.0
+
+    for signal_index, signal_state in enumerate(
+        phase.state
+    ):
+
+        if signal_index >= len(controlled_links):
+            break
+
+        # Consider green movements only.
+        if signal_state not in ("G", "g"):
+            continue
+
+        links = controlled_links[signal_index]
+
+        if links is None:
+            continue
+
+        for link in links:
+
+            if link is None:
+                continue
+
+            lane_id = link[0]
+
+            if lane_id is None:
+                continue
+
+            queue += (
+                traci.lane.getLastStepHaltingNumber(
+                    lane_id
+                )
+            )
+
+    return float(queue)
+
+
+print("\nMetric functions ready.")
+
+
+# ============================================================
+# 5. SUMO SESSION HELPER
+# ============================================================
+
+def start_sumo(seed=RANDOM_SEED):
+    """
+    Start a fresh SUMO instance with a deterministic seed.
+    """
+
+    sumo_cmd = [
+        "sumo",
+        "-c",
+        str(CONFIG_FILE),
+        "--start",
+        "--quit-on-end",
+        "--seed",
+        str(seed),
+    ]
+
+    try:
+        traci.start(sumo_cmd)
+
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to start SUMO for evaluation."
+        ) from exc
+
+
+def close_sumo():
+    """
+    Safely close the current TraCI connection.
+    """
+
+    try:
+        traci.close()
+    except Exception:
+        pass
+
+
+# ============================================================
+# 6. METRIC AGGREGATION
+# ============================================================
+
+def summarize_policy_metrics(
+    policy_name,
+    queue_history,
+    waiting_history,
+    vehicle_history,
+):
+    """
+    Convert raw time-series measurements into summary metrics.
+    """
+
+    if len(queue_history) == 0:
+        raise RuntimeError(
+            f"No queue measurements recorded for "
+            f"policy '{policy_name}'."
+        )
+
+    return {
+        "policy": policy_name,
+        "average_queue": float(
+            np.mean(queue_history)
+        ),
+        "maximum_queue": float(
+            np.max(queue_history)
+        ),
+        "average_waiting_time": float(
+            np.mean(waiting_history)
+        ),
+        "maximum_waiting_time": float(
+            np.max(waiting_history)
+        ),
+        "average_vehicles": float(
+            np.mean(vehicle_history)
+        ),
+        "peak_vehicles": int(
+            np.max(vehicle_history)
+        ),
+        "simulation_steps": len(queue_history),
+    }
+
+
+# ============================================================
+# 7. POLICY 1 — FIXED-TIME BASELINE
+# ============================================================
+#
+# SUMO's configured/default signal program is allowed to run
+# without external phase-control actions.
+#
+# This provides the reference baseline.
+# ============================================================
+
+def run_fixed_time(
+    steps=SIM_STEPS,
+    seed=RANDOM_SEED,
+):
+    """
+    Evaluate SUMO's default/fixed-time signal control.
+    """
+
+    start_sumo(seed)
+
+    queue_history = []
+    waiting_history = []
+    vehicle_history = []
+
+    try:
+
+        for _ in range(steps):
+
+            if (
+                traci.simulation
+                .getMinExpectedNumber()
+                <= 0
+            ):
+                break
+
+            traci.simulationStep()
+
+            queue, waiting, vehicles = (
+                get_network_metrics()
+            )
+
+            queue_history.append(queue)
+            waiting_history.append(waiting)
+            vehicle_history.append(vehicles)
+
+    finally:
+        close_sumo()
+
+    return summarize_policy_metrics(
+        "fixed_time",
+        queue_history,
+        waiting_history,
+        vehicle_history,
+    )
+
+
+fixed_result = run_fixed_time()
+
+print("\nFixed-time evaluation completed.")
+print(fixed_result)
+
+
+# ============================================================
+# 8. POLICY 2 — CYCLIC CONTROL
+# ============================================================
+#
+# Every DECISION_INTERVAL steps, each traffic light advances
+# through its available phases in a deterministic cycle.
+#
+# This is a simple non-learning control baseline.
+# ============================================================
+
+def run_cyclic(
+    steps=SIM_STEPS,
+    decision_interval=DECISION_INTERVAL,
+    seed=RANDOM_SEED,
+):
+    """
+    Evaluate deterministic cyclic signal control.
+    """
+
+    start_sumo(seed)
+
+    traffic_lights = list(
+        traci.trafficlight.getIDList()
+    )
+
+    if len(traffic_lights) == 0:
+        close_sumo()
+
+        raise RuntimeError(
+            "No traffic lights found for cyclic policy."
+        )
+
+    phase_counts = {}
+
+    for tls_id in traffic_lights:
+
+        program_logics = (
+            traci.trafficlight
+            .getAllProgramLogics(tls_id)
+        )
+
+        if len(program_logics) == 0:
+            close_sumo()
+
+            raise RuntimeError(
+                f"No signal program found for '{tls_id}'."
+            )
+
+        phase_counts[tls_id] = len(
+            program_logics[0].getPhases()
+        )
+
+    queue_history = []
+    waiting_history = []
+    vehicle_history = []
+
+    try:
+
+        for step in range(steps):
+
+            if (
+                traci.simulation
+                .getMinExpectedNumber()
+                <= 0
+            ):
+                break
+
+            # Update all signals at the configured
+            # decision interval.
+            if step % decision_interval == 0:
+
+                cycle_index = (
+                    step // decision_interval
+                )
+
+                for tls_id in traffic_lights:
+
+                    action = (
+                        cycle_index
+                        % phase_counts[tls_id]
+                    )
+
+                    traci.trafficlight.setPhase(
+                        tls_id,
+                        action,
+                    )
+
+            traci.simulationStep()
+
+            queue, waiting, vehicles = (
+                get_network_metrics()
+            )
+
+            queue_history.append(queue)
+            waiting_history.append(waiting)
+            vehicle_history.append(vehicles)
+
+    finally:
+        close_sumo()
+
+    return summarize_policy_metrics(
+        "cyclic",
+        queue_history,
+        waiting_history,
+        vehicle_history,
+    )
+
+
+cyclic_result = run_cyclic()
+
+print("\nCyclic evaluation completed.")
+print(cyclic_result)
+
+
+# ============================================================
+# 9. POLICY 3 — DECENTRALIZED MULTI-AGENT HEURISTIC
+# ============================================================
+#
+# Every traffic signal independently:
+#
+#   1. Examines each available phase.
+#   2. Estimates the queue associated with that phase.
+#   3. Selects the phase serving the largest queue.
+#
+# This is a decentralized heuristic.
+#
+# It is NOT:
+#   - PPO
+#   - MAPPO
+#   - trained MARL
+#   - learned policy
+#
+# It is a benchmark controller for the architecture developed
+# in Module 06.
+# ============================================================
+
+def run_multi_agent(
+    steps=SIM_STEPS,
+    decision_interval=DECISION_INTERVAL,
+    seed=RANDOM_SEED,
+):
+    """
+    Evaluate the decentralized multi-agent queue-based
+    heuristic controller.
+    """
+
+    start_sumo(seed)
+
+    traffic_lights = list(
+        traci.trafficlight.getIDList()
+    )
+
+    if len(traffic_lights) == 0:
+        close_sumo()
+
+        raise RuntimeError(
+            "No traffic lights found for multi-agent policy."
+        )
+
+    queue_history = []
+    waiting_history = []
+    vehicle_history = []
+
+    try:
+
+        for step in range(steps):
+
+            if (
+                traci.simulation
+                .getMinExpectedNumber()
+                <= 0
+            ):
+                break
+
+            # Agents make decisions at fixed intervals.
+            if step % decision_interval == 0:
+
+                for tls_id in traffic_lights:
+
+                    program_logics = (
+                        traci.trafficlight
+                        .getAllProgramLogics(
+                            tls_id
+                        )
+                    )
+
+                    if len(program_logics) == 0:
+                        raise RuntimeError(
+                            f"No signal program found "
+                            f"for '{tls_id}'."
+                        )
+
+                    phases = (
+                        program_logics[0]
+                        .getPhases()
+                    )
+
+                    if len(phases) == 0:
+                        raise RuntimeError(
+                            f"No phases found "
+                            f"for '{tls_id}'."
+                        )
+
+                    phase_scores = []
+
+                    for phase_index in range(
+                        len(phases)
+                    ):
+
+                        score = get_phase_queue(
+                            tls_id,
+                            phase_index,
+                        )
+
+                        phase_scores.append(
+                            score
+                        )
+
+                    # Choose the phase associated with
+                    # the largest currently estimated queue.
+                    action = int(
+                        np.argmax(
+                            phase_scores
+                        )
+                    )
+
+                    traci.trafficlight.setPhase(
+                        tls_id,
+                        action,
+                    )
+
+            traci.simulationStep()
+
+            queue, waiting, vehicles = (
+                get_network_metrics()
+            )
+
+            queue_history.append(queue)
+            waiting_history.append(waiting)
+            vehicle_history.append(vehicles)
+
+    finally:
+        close_sumo()
+
+    return summarize_policy_metrics(
+        "multi_agent_heuristic",
+        queue_history,
+        waiting_history,
+        vehicle_history,
+    )
+
+
+multi_agent_result = run_multi_agent()
+
+print(
+    "\nMulti-agent heuristic evaluation completed."
+)
+print(multi_agent_result)
+
+
+# ============================================================
+# 10. COMBINE POLICY RESULTS
+# ============================================================
+
+results = pd.DataFrame(
+    [
+        fixed_result,
+        cyclic_result,
+        multi_agent_result,
+    ]
+)
+
+results = results.round(4)
+
+print("\nCONTROL POLICY COMPARISON")
+print("-" * 60)
+
+display(results)
+
+
+# ============================================================
+# 11. BASELINE COMPARISON
+# ============================================================
+#
+# Fixed-time control is used as the reference baseline.
+#
+# Percentage change is calculated as:
+#
+#   ((baseline - policy) / baseline) * 100
+#
+# Positive value:
+#   Policy has a lower metric than fixed-time baseline.
+#
+# Negative value:
+#   Policy has a higher metric than fixed-time baseline.
+#
+# IMPORTANT:
+#   These are descriptive percentage changes, not statistical
+#   significance tests.
+# ============================================================
+
+baseline = results[
+    results["policy"] == "fixed_time"
+].iloc[0]
+
+comparison = results.copy()
+
+baseline_queue = float(
+    baseline["average_queue"]
+)
+
+baseline_waiting = float(
+    baseline["average_waiting_time"]
+)
+
+
+# ------------------------------------------------------------
+# Queue comparison
+# ------------------------------------------------------------
+
+if baseline_queue > 0:
+
+    comparison[
+        "queue_change_vs_fixed_%"
+    ] = (
+        (
+            baseline_queue
+            - comparison["average_queue"]
+        )
+        / baseline_queue
+    ) * 100.0
+
+else:
+
+    comparison[
+        "queue_change_vs_fixed_%"
+    ] = np.nan
+
+
+# ------------------------------------------------------------
+# Waiting-time comparison
+# ------------------------------------------------------------
+
+if baseline_waiting > 0:
+
+    comparison[
+        "waiting_change_vs_fixed_%"
+    ] = (
+        (
+            baseline_waiting
+            - comparison[
+                "average_waiting_time"
+            ]
+        )
+        / baseline_waiting
+    ) * 100.0
+
+else:
+
+    comparison[
+        "waiting_change_vs_fixed_%"
+    ] = np.nan
+
+
+comparison = comparison.round(4)
+
+print("\nBASELINE COMPARISON")
+print("-" * 60)
+
+display(comparison)
+
+
+# ============================================================
+# 12. EXPERIMENT METADATA
+# ============================================================
+
+number_of_intersections = len(
+    traffic_lights
+) if "traffic_lights" in globals() else 4
+
+
+experiment_metadata = {
+    "project": (
+        "Urban Mobility Intelligence & "
+        "Multi-Agent Traffic Control"
+    ),
+    "network": "2x2 SUMO intersection grid",
+    "simulation_horizon_steps": SIM_STEPS,
+    "random_seed": RANDOM_SEED,
+    "number_of_intersections": 4,
+    "decision_interval_steps": DECISION_INTERVAL,
+    "policies": (
+        "fixed_time;cyclic;multi_agent_heuristic"
+    ),
+    "baseline_policy": "fixed_time",
+    "multi_agent_policy_type": (
+        "decentralized_queue_based_heuristic"
+    ),
+    "trained_marl": False,
+    "metrics": (
+        "average_queue;"
+        "maximum_queue;"
+        "average_waiting_time;"
+        "maximum_waiting_time;"
+        "average_vehicles;"
+        "peak_vehicles"
+    ),
+    "evaluation_scope": (
+        "single_seed_2x2_SUMO_prototype"
+    ),
+}
+
+
+print("\nEXPERIMENT METADATA")
+print("-" * 60)
+
+for key, value in experiment_metadata.items():
+    print(f"{key}: {value}")
+
+
+# ============================================================
+# 13. SAVE RESULTS
+# ============================================================
+
+RESULTS_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+results_file = (
+    RESULTS_DIR
+    / "module_07_control_comparison.csv"
+)
+
+comparison_file = (
+    RESULTS_DIR
+    / "module_07_control_comparison_with_baseline.csv"
+)
+
+metadata_file = (
+    RESULTS_DIR
+    / "module_07_experiment_metadata.csv"
+)
+
+
+# ------------------------------------------------------------
+# Save policy results
+# ------------------------------------------------------------
+
+results.to_csv(
+    results_file,
+    index=False,
+)
+
+
+# ------------------------------------------------------------
+# Save baseline comparison
+# ------------------------------------------------------------
+
+comparison.to_csv(
+    comparison_file,
+    index=False,
+)
+
+
+# ------------------------------------------------------------
+# Save experiment metadata
+# ------------------------------------------------------------
+
+pd.DataFrame(
+    [experiment_metadata]
+).to_csv(
+    metadata_file,
+    index=False,
+)
+
+
+print("\nResults saved successfully:")
+print(" -", results_file)
+print(" -", comparison_file)
+print(" -", metadata_file)
+
+
+# ============================================================
+# 14. FINAL MODULE REPORT
+# ============================================================
+
+print("""
+============================================================
+MODULE 07 — EXPERIMENTATION & EVALUATION
+============================================================
+
+Experimental environment
+------------------------
+Network                : 2 × 2 SUMO grid
+Simulation horizon     : 1000 steps
+Random seed            : 42
+Intersections          : 4
+Decision interval      : 10 steps
+
+Policies evaluated
+------------------
+1. Fixed-time baseline
+2. Cyclic signal control
+3. Decentralized multi-agent heuristic
+
+Metrics
+-------
+- Average queue
+- Maximum queue
+- Average waiting time
+- Maximum waiting time
+- Average vehicles
+- Peak vehicles
+
+Evaluation characteristics
+--------------------------
+Reproducible seed        : Yes
+Fixed-time baseline      : Yes
+Zero-safe percentages    : Yes
+Results persisted        : Yes
+Trained MARL evaluated   : No
+Multi-agent controller   : Heuristic
+
+Research role
+-------------
+Module 07 provides a controlled benchmark for the current
+traffic-signal policies and establishes the evaluation
+framework required for future learned MARL experiments.
+
+Important limitation
+--------------------
+Current results are from a single-seed, lightweight 2 × 2
+SUMO prototype. They should be interpreted as an engineering
+benchmark rather than evidence of general policy superiority.
+
+Module 07 completed successfully.
+============================================================
+""")
+
+display(comparison)
+```
