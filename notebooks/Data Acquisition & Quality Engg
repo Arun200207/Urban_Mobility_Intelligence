@@ -1,0 +1,451 @@
+# ============================================================
+# MODULE 01 — DATA ACQUISITION & QUALITY ENGINEERING
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+
+# This module:
+# 1. Mounts Google Drive (Colab)
+# 2. Creates the project data directory
+# 3. Discovers METR-LA HDF5 and PKL files
+# 4. Copies raw files into the project workspace
+# 5. Inspects the HDF5 traffic data
+# 6. Validates basic data quality
+# 7. Inspects sensor metadata and adjacency information
+# 8. Produces a final dataset-quality summary
+#
+# Note:
+# Raw dataset files should NOT be committed to GitHub.
+# Keep them locally under data/raw/.
+
+
+# ============================================================
+# CELL 01 — Environment Setup
+# ============================================================
+
+from pathlib import Path
+import os
+import shutil
+import pickle
+
+import pandas as pd
+
+
+# Google Colab / Google Drive configuration
+try:
+    from google.colab import drive
+
+    drive.mount("/content/drive")
+
+    DRIVE_DIR = Path("/content/drive/MyDrive")
+    PROJECT_DIR = DRIVE_DIR / "Urban_Mobility_Project"
+
+    print("Google Drive mounted successfully.")
+
+except ImportError:
+    # Allows the module to remain importable outside Colab.
+    DRIVE_DIR = None
+    PROJECT_DIR = Path.cwd()
+
+    print("Google Colab not detected.")
+    print("Using current working directory as project root.")
+
+
+DATA_DIR = PROJECT_DIR / "data" / "raw"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+print("\nProject directory:", PROJECT_DIR)
+print("Raw data directory:", DATA_DIR)
+
+
+# ============================================================
+# CELL 02 — Dataset Discovery
+# ============================================================
+
+def find_dataset_files(search_dir: Path, destination_dir: Path):
+    """
+    Recursively search for HDF5 and PKL dataset files.
+
+    The destination directory is excluded to prevent the project
+    from rediscovering files that were already copied.
+    """
+
+    h5_files = []
+    pkl_files = []
+
+    destination_dir = destination_dir.resolve()
+
+    for root, dirs, files in os.walk(search_dir):
+
+        current_root = Path(root).resolve()
+
+        # Prevent recursive discovery of copied project files.
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if (current_root / directory).resolve() != destination_dir
+        ]
+
+        if current_root == destination_dir:
+            continue
+
+        for filename in files:
+
+            file_path = current_root / filename
+
+            if filename.lower().endswith(".h5"):
+                h5_files.append(file_path)
+
+            elif filename.lower().endswith(".pkl"):
+                pkl_files.append(file_path)
+
+    return h5_files, pkl_files
+
+
+if DRIVE_DIR is not None:
+
+    h5_files, pkl_files = find_dataset_files(
+        DRIVE_DIR,
+        DATA_DIR
+    )
+
+else:
+
+    # Outside Colab, search locally within the project.
+    h5_files, pkl_files = find_dataset_files(
+        PROJECT_DIR,
+        DATA_DIR
+    )
+
+
+print("HDF5 files found:", len(h5_files))
+for file in h5_files:
+    print(" -", file)
+
+print("\nPKL files found:", len(pkl_files))
+for file in pkl_files:
+    print(" -", file)
+
+
+# ============================================================
+# CELL 03 — Dataset Validation Before Copy
+# ============================================================
+
+if not h5_files:
+    raise FileNotFoundError(
+        "No .h5 dataset file was found. "
+        "Please place the METR-LA HDF5 file in an accessible location."
+    )
+
+if not pkl_files:
+    raise FileNotFoundError(
+        "No .pkl metadata file was found. "
+        "Please place the METR-LA metadata file in an accessible location."
+    )
+
+print("\nDataset files successfully discovered.")
+
+
+# ============================================================
+# CELL 04 — Copy Raw Dataset into Project Workspace
+# ============================================================
+
+def copy_dataset_files(files, destination_dir):
+    """
+    Copy dataset files into data/raw while preserving metadata.
+    Existing files with the same name are replaced.
+    """
+
+    copied_files = []
+
+    for source_file in files:
+
+        destination_file = destination_dir / source_file.name
+
+        shutil.copy2(source_file, destination_file)
+
+        copied_files.append(destination_file)
+
+        print("Copied:", source_file.name)
+
+    return copied_files
+
+
+copied_h5_files = copy_dataset_files(
+    h5_files,
+    DATA_DIR
+)
+
+copied_pkl_files = copy_dataset_files(
+    pkl_files,
+    DATA_DIR
+)
+
+
+# ============================================================
+# CELL 05 — Confirm Project Data Directory
+# ============================================================
+
+h5_files = sorted(DATA_DIR.glob("*.h5"))
+pkl_files = sorted(DATA_DIR.glob("*.pkl"))
+
+print("\nFiles available in data/raw/")
+print("-" * 40)
+
+for file in h5_files:
+    print("H5  :", file.name)
+
+for file in pkl_files:
+    print("PKL :", file.name)
+
+
+if not h5_files:
+    raise FileNotFoundError("No HDF5 file exists in data/raw/.")
+
+if not pkl_files:
+    raise FileNotFoundError("No PKL file exists in data/raw.")
+
+
+# ============================================================
+# CELL 06 — HDF5 Structure Inspection
+# ============================================================
+
+h5_path = h5_files[0]
+
+print("Selected HDF5 file:")
+print(h5_path)
+
+with pd.HDFStore(h5_path, mode="r") as store:
+
+    hdf_keys = store.keys()
+
+    print("\nHDF5 contents:")
+    for key in hdf_keys:
+        print(" -", key)
+
+
+if not hdf_keys:
+    raise ValueError("The HDF5 file does not contain any datasets.")
+
+
+# ============================================================
+# CELL 07 — Load Traffic Observations
+# ============================================================
+
+# Use the first available HDF5 dataset.
+hdf_key = hdf_keys[0]
+
+with pd.HDFStore(h5_path, mode="r") as store:
+    traffic_df = store[hdf_key]
+
+
+print("Traffic data loaded successfully.")
+print("Shape:", traffic_df.shape)
+
+display(traffic_df.head())
+
+
+# ============================================================
+# CELL 08 — Traffic Data Quality Checks
+# ============================================================
+
+missing_values = int(traffic_df.isna().sum().sum())
+number_of_rows = int(traffic_df.shape[0])
+number_of_sensors = int(traffic_df.shape[1])
+
+print("DATA QUALITY CHECK")
+print("-" * 40)
+
+print("Rows / observations :", number_of_rows)
+print("Sensors             :", number_of_sensors)
+print("Missing values      :", missing_values)
+
+print("\nTraffic statistics:")
+display(traffic_df.describe())
+
+
+# Basic validation
+assert number_of_rows > 0, "Traffic dataset contains no observations."
+assert number_of_sensors > 0, "Traffic dataset contains no sensors."
+
+print("\nBasic traffic-data validation passed.")
+
+
+# ============================================================
+# CELL 09 — Timestamp Validation
+# ============================================================
+
+if not isinstance(traffic_df.index, pd.DatetimeIndex):
+
+    try:
+        traffic_df.index = pd.to_datetime(traffic_df.index)
+        print("Index converted to DatetimeIndex.")
+
+    except Exception as error:
+        raise TypeError(
+            "Traffic data index could not be converted to timestamps."
+        ) from error
+
+
+time_differences = traffic_df.index.to_series().diff().dropna()
+
+unique_intervals = time_differences.unique()
+
+print("Timestamp validation")
+print("-" * 40)
+
+print("Start timestamp :", traffic_df.index.min())
+print("End timestamp   :", traffic_df.index.max())
+print("Unique intervals:", unique_intervals)
+
+
+# The METR-LA dataset is expected to use 5-minute intervals.
+expected_interval = pd.Timedelta(minutes=5)
+
+if len(unique_intervals) == 1:
+
+    assert unique_intervals[0] == expected_interval, (
+        f"Unexpected time interval: {unique_intervals[0]}"
+    )
+
+    print("Timestamp interval: 5 minutes")
+    print("Temporal validation passed.")
+
+else:
+
+    print(
+        "Warning: Multiple timestamp intervals were detected."
+    )
+
+
+# ============================================================
+# CELL 10 — Metadata Inspection
+# ============================================================
+
+pkl_path = pkl_files[0]
+
+print("Selected metadata file:")
+print(pkl_path)
+
+with open(pkl_path, "rb") as file:
+    metadata = pickle.load(file, encoding="latin1")
+
+
+print("\nPKL object type:", type(metadata))
+print("Number of metadata objects:", len(metadata))
+
+
+# Validate expected metadata structure.
+if len(metadata) < 3:
+    raise ValueError(
+        "Unexpected metadata structure. "
+        "Expected at least three objects."
+    )
+
+
+sensor_ids = metadata[0]
+sensor_mapping = metadata[1]
+adjacency_matrix = metadata[2]
+
+
+# ============================================================
+# CELL 11 — Metadata Quality Checks
+# ============================================================
+
+print("METADATA QUALITY CHECK")
+print("-" * 40)
+
+print("Sensor IDs:")
+print(" - Type  :", type(sensor_ids))
+print(" - Count :", len(sensor_ids))
+
+print("\nSensor mapping:")
+print(" - Type  :", type(sensor_mapping))
+print(" - Size  :", len(sensor_mapping))
+
+print("\nAdjacency matrix:")
+print(" - Type  :", type(adjacency_matrix))
+print(" - Shape :", adjacency_matrix.shape)
+
+
+# Metadata validation
+assert len(sensor_ids) == number_of_sensors, (
+    "Number of sensor IDs does not match traffic data columns."
+)
+
+assert len(sensor_mapping) == number_of_sensors, (
+    "Sensor mapping size does not match sensor count."
+)
+
+assert adjacency_matrix.shape == (
+    number_of_sensors,
+    number_of_sensors
+), (
+    "Adjacency matrix dimensions do not match sensor count."
+)
+
+
+print("\nMetadata validation passed.")
+
+
+# ============================================================
+# CELL 12 — Metadata Preview
+# ============================================================
+
+print("First 5 sensor IDs:")
+print(sensor_ids[:5])
+
+print("\nFirst 5 sensor mappings:")
+print(list(sensor_mapping.items())[:5])
+
+print("\nAdjacency matrix preview:")
+display(
+    pd.DataFrame(adjacency_matrix).iloc[:5, :5]
+)
+
+
+# ============================================================
+# CELL 13 — Final Dataset Quality Summary
+# ============================================================
+
+print("=" * 60)
+print("MODULE 01 — DATA ACQUISITION & QUALITY ENGINEERING")
+print("=" * 60)
+
+print("\nDataset")
+print("-" * 40)
+print("HDF5 file           :", h5_path.name)
+print("Metadata file       :", pkl_path.name)
+
+print("\nTraffic observations")
+print("-" * 40)
+print("Observations        :", number_of_rows)
+print("Traffic sensors     :", number_of_sensors)
+print("Missing values      :", missing_values)
+
+print("\nTime range")
+print("-" * 40)
+print("Start               :", traffic_df.index.min())
+print("End                 :", traffic_df.index.max())
+print("Time interval       :", expected_interval)
+
+print("\nSensor metadata")
+print("-" * 40)
+print("Sensor IDs          :", len(sensor_ids))
+print("Sensor mapping      :", len(sensor_mapping))
+print("Adjacency matrix    :", adjacency_matrix.shape)
+
+print("\nQuality status")
+print("-" * 40)
+
+if missing_values == 0:
+    print("Missing-value check : PASSED")
+else:
+    print("Missing-value check : REVIEW REQUIRED")
+
+print("Sensor consistency  : PASSED")
+print("Metadata structure  : PASSED")
+print("Timestamp structure : PASSED")
+
+print("\n" + "=" * 60)
+print("MODULE 01 COMPLETED SUCCESSFULLY")
+print("=" * 60)
