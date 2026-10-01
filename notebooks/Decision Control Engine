@@ -1,0 +1,457 @@
+```python
+# ============================================================
+# MODULE 05 — DECISION & CONTROL ENGINE
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+#
+# Purpose:
+#   Build a signal-control environment in SUMO using TraCI.
+#
+# Current implementation:
+#   - State: lane-level queue lengths
+#   - Action: traffic-signal phase selection
+#   - Reward: negative total queue
+#   - Baseline policy: deterministic phase cycling
+#   - RL status: PPO-ready environment design, NOT trained PPO
+#
+# Research role:
+#   Provides the decision/control interface required for future
+#   reinforcement-learning and multi-agent reinforcement-learning.
+#
+# ============================================================
+
+
+# ============================================================
+# 1. IMPORTS & CONFIGURATION
+# ============================================================
+
+import os
+import sys
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+# ------------------------------------------------------------
+# Project paths
+# ------------------------------------------------------------
+
+if "PROJECT_DIR" in globals():
+    PROJECT_DIR = Path(PROJECT_DIR)
+else:
+    PROJECT_DIR = Path("/content/drive/MyDrive/Urban_Mobility_Project")
+
+SUMO_DIR = PROJECT_DIR / "sumo"
+CONFIG_FILE = SUMO_DIR / "simulation.sumocfg"
+
+print("Project directory:", PROJECT_DIR)
+print("SUMO directory:", SUMO_DIR)
+print("SUMO config:", CONFIG_FILE)
+
+
+# ------------------------------------------------------------
+# Validate SUMO configuration
+# ------------------------------------------------------------
+
+if not SUMO_DIR.exists():
+    raise FileNotFoundError(
+        f"SUMO directory does not exist: {SUMO_DIR}"
+    )
+
+if not CONFIG_FILE.exists():
+    raise FileNotFoundError(
+        f"SUMO configuration file not found: {CONFIG_FILE}"
+    )
+
+if shutil.which("sumo") is None:
+    raise FileNotFoundError(
+        "SUMO executable was not found in PATH. "
+        "Install SUMO before running Module 05."
+    )
+
+
+# ------------------------------------------------------------
+# Import TraCI
+# ------------------------------------------------------------
+
+SUMO_HOME = os.environ.get("SUMO_HOME", "/usr/share/sumo")
+
+if Path(SUMO_HOME).exists():
+    SUMO_TOOLS = Path(SUMO_HOME) / "tools"
+
+    if str(SUMO_TOOLS) not in sys.path:
+        sys.path.append(str(SUMO_TOOLS))
+
+try:
+    import traci
+except ImportError as exc:
+    raise ImportError(
+        "TraCI could not be imported. "
+        "Verify that SUMO and its Python tools are installed."
+    ) from exc
+
+
+# ============================================================
+# 2. START SUMO
+# ============================================================
+
+sumo_cmd = [
+    "sumo",
+    "-c",
+    str(CONFIG_FILE),
+    "--start",
+    "--quit-on-end",
+]
+
+print("\nStarting SUMO...")
+
+try:
+    traci.start(sumo_cmd)
+    print("SUMO started successfully.")
+except Exception as exc:
+    raise RuntimeError(
+        "Failed to start SUMO through TraCI."
+    ) from exc
+
+
+# ============================================================
+# 3. DISCOVER TRAFFIC-SIGNAL AGENTS
+# ============================================================
+
+traffic_lights = traci.trafficlight.getIDList()
+
+if len(traffic_lights) == 0:
+    traci.close()
+    raise RuntimeError(
+        "No traffic lights were found in the SUMO network."
+    )
+
+print("\nTraffic lights:")
+for tls in traffic_lights:
+    print(" -", tls)
+
+print("Number of intersections:", len(traffic_lights))
+
+
+# ------------------------------------------------------------
+# Select one intersection for the single-agent control demo
+# ------------------------------------------------------------
+
+tls_id = traffic_lights[0]
+
+print("\nSelected intersection:", tls_id)
+
+
+# ============================================================
+# 4. INSPECT SIGNAL CONTROL STRUCTURE
+# ============================================================
+
+controlled_links = traci.trafficlight.getControlledLinks(tls_id)
+phase_programs = traci.trafficlight.getAllProgramLogics(tls_id)
+
+if len(phase_programs) == 0:
+    traci.close()
+    raise RuntimeError(
+        f"No signal programs found for traffic light '{tls_id}'."
+    )
+
+print("Controlled links:", len(controlled_links))
+print("Signal programs:", len(phase_programs))
+
+
+# ------------------------------------------------------------
+# Use the active/default signal program
+# ------------------------------------------------------------
+
+logic = phase_programs[0]
+phases = logic.getPhases()
+
+if len(phases) == 0:
+    traci.close()
+    raise RuntimeError(
+        f"No signal phases found for traffic light '{tls_id}'."
+    )
+
+number_of_phases = len(phases)
+
+print("Available phases:", number_of_phases)
+
+for phase_index, phase in enumerate(phases):
+    print(
+        f"Action {phase_index}: "
+        f"state={phase.state}, "
+        f"duration={phase.duration}"
+    )
+
+
+# ============================================================
+# 5. STATE REPRESENTATION
+# ============================================================
+#
+# Each controlled traffic signal observes queue lengths on the
+# lanes associated with its controlled links.
+#
+# State:
+#   [queue_lane_1, queue_lane_2, ..., queue_lane_n]
+#
+# This is intentionally simple and interpretable.
+# ============================================================
+
+def get_controlled_lanes(tls_id):
+    """
+    Return unique incoming/control lanes associated with a
+    traffic signal.
+    """
+
+    lanes = []
+
+    controlled_links = traci.trafficlight.getControlledLinks(tls_id)
+
+    for links in controlled_links:
+
+        if links is None:
+            continue
+
+        for link in links:
+
+            if link is None:
+                continue
+
+            if len(link) == 0:
+                continue
+
+            lane_id = link[0]
+
+            if lane_id is not None:
+                lanes.append(lane_id)
+
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(lanes))
+
+
+def get_state(tls_id):
+    """
+    Return the current lane-level queue state.
+
+    Queue metric:
+        Number of halted vehicles on each controlled lane.
+    """
+
+    lanes = get_controlled_lanes(tls_id)
+
+    queue_lengths = [
+        traci.lane.getLastStepHaltingNumber(lane_id)
+        for lane_id in lanes
+    ]
+
+    return np.asarray(queue_lengths, dtype=np.float32)
+
+
+controlled_lanes = get_controlled_lanes(tls_id)
+state = get_state(tls_id)
+
+if len(state) == 0:
+    traci.close()
+    raise RuntimeError(
+        f"No controlled lanes were detected for traffic light '{tls_id}'."
+    )
+
+print("\nState representation")
+print("--------------------")
+print("Controlled lanes:", len(controlled_lanes))
+print("State shape:", state.shape)
+print("Current state:", state)
+
+
+# ============================================================
+# 6. REWARD FUNCTION
+# ============================================================
+#
+# Reward:
+#
+#       reward = - total queue
+#
+# Lower queue -> less negative reward
+# Higher queue -> more negative reward
+#
+# This is a simple congestion-oriented reward suitable for
+# demonstrating the control interface.
+# ============================================================
+
+def get_reward(tls_id):
+    """
+    Compute the current control reward.
+
+    Reward is the negative sum of halted vehicles across all
+    controlled lanes.
+    """
+
+    state = get_state(tls_id)
+
+    return -float(np.sum(state))
+
+
+reward = get_reward(tls_id)
+
+print("\nCurrent reward:", reward)
+
+
+# ============================================================
+# 7. TEST A SINGLE CONTROL ACTION
+# ============================================================
+#
+# Action:
+#   Select one of the available SUMO signal phases.
+#
+# This demonstrates that the controller can actively modify
+# the traffic signal through TraCI.
+# ============================================================
+
+action = 0
+
+if action >= number_of_phases:
+    raise ValueError(
+        f"Invalid action {action}. "
+        f"Valid actions are 0 to {number_of_phases - 1}."
+    )
+
+traci.trafficlight.setPhase(tls_id, action)
+
+for _ in range(10):
+    if traci.simulation.getMinExpectedNumber() <= 0:
+        break
+
+    traci.simulationStep()
+
+new_state = get_state(tls_id)
+new_reward = get_reward(tls_id)
+
+print("\nSingle-action control test")
+print("--------------------------")
+print("Selected action:", action)
+print("New state:", new_state)
+print("New reward:", new_reward)
+
+
+# ============================================================
+# 8. BASELINE CONTROL EPISODE
+# ============================================================
+#
+# IMPORTANT:
+#   This is NOT a trained reinforcement-learning policy.
+#
+# The current baseline simply cycles through available phases:
+#
+#       action = step % number_of_phases
+#
+# It provides a deterministic control policy that can later be
+# replaced by PPO, DQN, MARL, or another learned controller.
+# ============================================================
+
+EPISODE_STEPS = 200
+
+episode_rewards = []
+episode_actions = []
+
+for step in range(EPISODE_STEPS):
+
+    # --------------------------------------------------------
+    # Stop safely if the SUMO simulation has finished.
+    # --------------------------------------------------------
+    if traci.simulation.getMinExpectedNumber() <= 0:
+        break
+
+    current_state = get_state(tls_id)
+
+    # --------------------------------------------------------
+    # Temporary deterministic baseline policy.
+    # --------------------------------------------------------
+    action = step % number_of_phases
+
+    traci.trafficlight.setPhase(tls_id, action)
+
+    traci.simulationStep()
+
+    reward = get_reward(tls_id)
+
+    episode_actions.append(action)
+    episode_rewards.append(reward)
+
+
+# ============================================================
+# 9. CONTROL PERFORMANCE SUMMARY
+# ============================================================
+
+if len(episode_rewards) == 0:
+    raise RuntimeError(
+        "No control rewards were recorded during the episode."
+    )
+
+average_reward = float(np.mean(episode_rewards))
+total_reward = float(np.sum(episode_rewards))
+minimum_reward = float(np.min(episode_rewards))
+maximum_reward = float(np.max(episode_rewards))
+
+control_metrics = {
+    "intersection": tls_id,
+    "episode_steps": len(episode_rewards),
+    "number_of_phases": number_of_phases,
+    "state_dimension": len(state),
+    "average_reward": average_reward,
+    "total_reward": total_reward,
+    "minimum_reward": minimum_reward,
+    "maximum_reward": maximum_reward,
+    "control_policy": "deterministic_phase_cycling",
+    "reward_definition": "negative_total_queue",
+}
+
+
+print("\nEpisode completed.")
+print("Actual steps:", len(episode_rewards))
+print("Average reward:", round(average_reward, 4))
+print("Total reward:", round(total_reward, 4))
+print("Minimum reward:", round(minimum_reward, 4))
+print("Maximum reward:", round(maximum_reward, 4))
+
+
+# ============================================================
+# 10. CLEAN UP SUMO / TRACI
+# ============================================================
+
+try:
+    traci.close()
+    print("\nTraCI connection closed successfully.")
+except Exception:
+    pass
+
+
+# ============================================================
+# 11. FINAL MODULE REPORT
+# ============================================================
+
+print("""
+============================================================
+MODULE 05 — DECISION & CONTROL ENGINE
+============================================================
+Environment              : SUMO + TraCI
+Controlled intersections : 1
+Control mechanism        : Traffic signal phase
+State representation     : Lane-level queue lengths
+Reward                   : Negative total queue
+Baseline policy          : Deterministic phase cycling
+RL environment           : PPO-ready
+Trained PPO              : No
+SUMO control             : TraCI
+
+Research role:
+    Establishes the state/action/reward interface required
+    for future reinforcement-learning and multi-agent
+    reinforcement-learning experiments.
+
+Module 05 completed successfully.
+============================================================
+""")
+```
