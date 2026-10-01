@@ -1,0 +1,384 @@
+# ============================================================
+# MODULE 02 — TRAFFIC INTELLIGENCE ENGINE
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+
+# Purpose:
+# Convert raw traffic observations into an interpretable
+# network-level traffic-state representation.
+#
+# This module:
+# 1. Validates the traffic dataset
+# 2. Checks temporal resolution
+# 3. Computes network-level traffic statistics
+# 4. Extracts temporal features
+# 5. Creates a relative congestion indicator
+# 6. Builds the traffic-state dataset
+# 7. Examines hourly traffic patterns
+#
+# Important:
+# The congestion indicator is a statistical feature created
+# by this project. It is NOT a ground-truth congestion label.
+
+
+# ============================================================
+# CELL 01 — Imports
+# ============================================================
+
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+
+
+# ============================================================
+# CELL 02 — Validate Input Data
+# ============================================================
+
+if "traffic_df" not in globals():
+    raise NameError(
+        "traffic_df was not found. "
+        "Run Module 01 before running Module 02."
+    )
+
+
+if traffic_df.empty:
+    raise ValueError("traffic_df is empty.")
+
+
+if not isinstance(traffic_df.index, pd.DatetimeIndex):
+    try:
+        traffic_df.index = pd.to_datetime(traffic_df.index)
+    except Exception as error:
+        raise TypeError(
+            "traffic_df index must contain valid timestamps."
+        ) from error
+
+
+# Keep the raw traffic observations separate.
+# This prevents engineered features from being accidentally
+# included in later sensor-level calculations.
+sensor_data = traffic_df.copy()
+
+number_of_sensors = sensor_data.shape[1]
+
+
+print("Traffic data shape:", sensor_data.shape)
+print("Number of sensors:", number_of_sensors)
+
+display(sensor_data.head())
+
+
+# ============================================================
+# CELL 03 — Traffic Value Statistics
+# ============================================================
+
+print("Traffic value statistics:")
+
+display(
+    sensor_data.describe().T
+)
+
+
+# ============================================================
+# CELL 04 — Temporal Resolution Check
+# ============================================================
+
+time_diff = (
+    sensor_data.index
+    .to_series()
+    .diff()
+    .dropna()
+)
+
+
+if time_diff.empty:
+    raise ValueError(
+        "Not enough timestamps to determine temporal resolution."
+    )
+
+
+most_common_interval = time_diff.mode()[0]
+number_of_unique_intervals = time_diff.nunique()
+
+
+print("Most common time interval:")
+print(most_common_interval)
+
+print("\nNumber of unique intervals:")
+print(number_of_unique_intervals)
+
+
+# Expected METR-LA resolution
+expected_interval = pd.Timedelta(minutes=5)
+
+if most_common_interval == expected_interval:
+    print("\nTemporal resolution check: PASSED")
+else:
+    print(
+        "\nWarning: Expected a 5-minute interval, "
+        f"but detected {most_common_interval}."
+    )
+
+
+# ============================================================
+# CELL 05 — Network-Level Traffic Statistics
+# ============================================================
+
+# Each row represents one timestamp.
+# Each column represents one traffic sensor.
+
+network_mean = sensor_data.mean(axis=1)
+network_max = sensor_data.max(axis=1)
+network_min = sensor_data.min(axis=1)
+network_std = sensor_data.std(axis=1)
+
+
+network_features = pd.DataFrame(
+    {
+        "network_mean": network_mean,
+        "network_min": network_min,
+        "network_max": network_max,
+        "network_std": network_std,
+    },
+    index=sensor_data.index,
+)
+
+
+display(
+    network_features.head()
+)
+
+
+# ============================================================
+# CELL 06 — Temporal Traffic Features
+# ============================================================
+
+temporal_features = pd.DataFrame(
+    {
+        "hour": sensor_data.index.hour,
+        "day_of_week": sensor_data.index.dayofweek,
+        "is_weekend": (
+            sensor_data.index.dayofweek >= 5
+        ).astype(int),
+    },
+    index=sensor_data.index,
+)
+
+
+display(
+    temporal_features.head()
+)
+
+
+# ============================================================
+# CELL 07 — Relative Congestion Indicator
+# ============================================================
+
+# The lower quartile of network_mean is used as a simple
+# statistical threshold for identifying relatively low-speed /
+# high-congestion observations.
+#
+# IMPORTANT:
+# This is a project-defined statistical indicator.
+# It is NOT a ground-truth congestion label.
+
+congestion_threshold = (
+    network_features["network_mean"]
+    .quantile(0.25)
+)
+
+
+congestion_indicator = (
+    network_features["network_mean"]
+    <= congestion_threshold
+).astype(int)
+
+
+congestion_features = pd.DataFrame(
+    {
+        "congestion_indicator": congestion_indicator
+    },
+    index=sensor_data.index,
+)
+
+
+print("Congestion threshold:", congestion_threshold)
+
+print("\nCongestion observations:")
+print(
+    congestion_features["congestion_indicator"]
+    .value_counts()
+    .sort_index()
+)
+
+
+# ============================================================
+# CELL 08 — Build Traffic-State Dataset
+# ============================================================
+
+traffic_state = pd.concat(
+    [
+        network_features,
+        temporal_features,
+        congestion_features,
+    ],
+    axis=1,
+)
+
+
+print("Traffic-state dataset shape:", traffic_state.shape)
+
+display(
+    traffic_state.head()
+)
+
+
+# ============================================================
+# CELL 09 — Traffic-State Validation
+# ============================================================
+
+expected_features = [
+    "network_mean",
+    "network_min",
+    "network_max",
+    "network_std",
+    "hour",
+    "day_of_week",
+    "is_weekend",
+    "congestion_indicator",
+]
+
+
+missing_features = [
+    feature
+    for feature in expected_features
+    if feature not in traffic_state.columns
+]
+
+
+if missing_features:
+    raise ValueError(
+        f"Missing expected traffic-state features: "
+        f"{missing_features}"
+    )
+
+
+missing_state_values = (
+    traffic_state
+    .isna()
+    .sum()
+    .sum()
+)
+
+
+print("Traffic-state validation")
+print("-" * 40)
+print("Expected features :", len(expected_features))
+print("Actual features   :", traffic_state.shape[1])
+print("Missing values    :", missing_state_values)
+
+
+assert traffic_state.shape[1] == len(expected_features)
+
+print("\nTraffic-state validation passed.")
+
+
+# ============================================================
+# CELL 10 — Hourly Traffic Pattern
+# ============================================================
+
+hourly_pattern = (
+    traffic_state
+    .groupby("hour")["network_mean"]
+    .mean()
+)
+
+
+print("Average network traffic by hour:")
+
+display(
+    hourly_pattern
+)
+
+
+# ============================================================
+# CELL 11 — Traffic-State Summary
+# ============================================================
+
+print("=" * 60)
+print("MODULE 02 — TRAFFIC INTELLIGENCE ENGINE")
+print("=" * 60)
+
+print("\nInput")
+print("-" * 40)
+print("Traffic observations :", sensor_data.shape[0])
+print("Traffic sensors      :", number_of_sensors)
+
+print("\nTemporal structure")
+print("-" * 40)
+print("Most common interval:", most_common_interval)
+print("Unique intervals     :", number_of_unique_intervals)
+
+print("\nTraffic-state output")
+print("-" * 40)
+print("Observations         :", traffic_state.shape[0])
+print("Features             :", traffic_state.shape[1])
+
+print("\nFeatures created:")
+for column in traffic_state.columns:
+    print(" -", column)
+
+print("\nCongestion indicator")
+print("-" * 40)
+print(
+    "Threshold            :",
+    congestion_threshold
+)
+print(
+    "Indicator definition :",
+    "network_mean <= 25th percentile"
+)
+
+print("\nQuality status")
+print("-" * 40)
+
+if missing_state_values == 0:
+    print("Missing values       : PASSED")
+else:
+    print(
+        "Missing values       : REVIEW REQUIRED"
+    )
+
+print("Feature validation   : PASSED")
+
+print("\n" + "=" * 60)
+print("MODULE 02 COMPLETED SUCCESSFULLY")
+print("=" * 60)
+
+
+# ============================================================
+# FINAL OUTPUT OBJECTS
+# ============================================================
+#
+# sensor_data
+#     Raw sensor-level traffic observations.
+#
+# network_features
+#     Network-level statistical features.
+#
+# temporal_features
+#     Time-based traffic features.
+#
+# congestion_features
+#     Relative congestion indicator.
+#
+# traffic_state
+#     Final engineered traffic-state dataset.
+#
+# hourly_pattern
+#     Average network traffic grouped by hour.
+#
+# These objects are intentionally kept in memory for use by
+# later project modules.
+# ============================================================
