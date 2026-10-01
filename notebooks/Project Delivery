@@ -1,0 +1,1464 @@
+```python
+# ============================================================
+# MODULE 08 — INTELLIGENCE DELIVERY
+# GitHub-ready project delivery and reporting pipeline
+# ============================================================
+
+"""
+Urban Mobility Intelligence & Multi-Agent Traffic Control
+Module 08 — Intelligence Delivery
+
+Purpose
+-------
+Package the outputs of Modules 01–07 into reproducible,
+presentation-ready project artifacts.
+
+This module:
+    1. Loads Module 07 experiment results.
+    2. Validates expected result files and schemas.
+    3. Generates control-performance visualizations.
+    4. Generates project KPI and architecture visuals.
+    5. Produces clean CSV summaries.
+    6. Produces a final project completion report.
+    7. Registers generated visual assets.
+
+Technical scope
+---------------
+Current project includes:
+    - METR-LA traffic data
+    - Traffic-state feature engineering
+    - XGBoost temporal baseline
+    - Traffic-network graph representation
+    - GNN-ready graph structure
+    - SUMO traffic simulation
+    - TraCI signal control
+    - Decentralized multi-agent control
+    - Heuristic control-policy benchmarking
+
+The current project does NOT claim:
+    - trained PPO
+    - trained MARL
+    - trained GNN/SOTA spatio-temporal learning
+    - calibrated METR-LA-to-SUMO digital twin
+    - generalized superiority of a control policy
+
+The multi-agent controller is a decentralized heuristic
+designed as infrastructure for future MARL research.
+"""
+
+
+# ============================================================
+# CELL 01 — SETUP & LOAD PROJECT RESULTS
+# ============================================================
+
+from pathlib import Path
+import os
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# ------------------------------------------------------------
+# Project paths
+# ------------------------------------------------------------
+
+# GitHub / local execution:
+#   python module_08_delivery.py
+#
+# Colab:
+#   set the environment variable:
+#   URBAN_MOBILITY_PROJECT_DIR=/content/drive/MyDrive/Urban_Mobility_Project
+#
+# If no environment variable is provided, use the current
+# working directory as the project root.
+
+PROJECT_DIR = Path(
+    os.environ.get(
+        "URBAN_MOBILITY_PROJECT_DIR",
+        Path.cwd()
+    )
+).resolve()
+
+RESULTS_DIR = PROJECT_DIR / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ------------------------------------------------------------
+# Module 07 output files
+# ------------------------------------------------------------
+
+comparison_file = (
+    RESULTS_DIR / "module_07_control_comparison.csv"
+)
+
+baseline_file = (
+    RESULTS_DIR / "module_07_control_comparison_with_baseline.csv"
+)
+
+metadata_file = (
+    RESULTS_DIR / "module_07_experiment_metadata.csv"
+)
+
+
+# ------------------------------------------------------------
+# Validation helpers
+# ------------------------------------------------------------
+
+def require_file(path: Path) -> None:
+    """Raise a clear error if a required project file is missing."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Required file not found:\n{path}\n\n"
+            "Run Module 07 before running Module 08."
+        )
+
+
+def require_columns(
+    dataframe: pd.DataFrame,
+    required_columns: list[str],
+    dataframe_name: str
+) -> None:
+    """Validate that a DataFrame contains required columns."""
+    missing = [
+        column
+        for column in required_columns
+        if column not in dataframe.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"{dataframe_name} is missing required columns: {missing}"
+        )
+
+
+# ------------------------------------------------------------
+# Check Module 07 outputs
+# ------------------------------------------------------------
+
+for required_file in [
+    comparison_file,
+    baseline_file,
+    metadata_file
+]:
+    require_file(required_file)
+
+
+# ------------------------------------------------------------
+# Load Module 07 results
+# ------------------------------------------------------------
+
+comparison_df = pd.read_csv(comparison_file)
+baseline_df = pd.read_csv(baseline_file)
+metadata_df = pd.read_csv(metadata_file)
+
+
+# ------------------------------------------------------------
+# Validate result schemas
+# ------------------------------------------------------------
+
+required_comparison_columns = [
+    "policy",
+    "average_queue",
+    "maximum_queue",
+    "average_waiting_time",
+    "maximum_waiting_time",
+    "average_vehicles",
+    "peak_vehicles"
+]
+
+require_columns(
+    comparison_df,
+    required_comparison_columns,
+    "comparison_df"
+)
+
+require_columns(
+    baseline_df,
+    ["policy"],
+    "baseline_df"
+)
+
+require_columns(
+    metadata_df,
+    ["parameter", "value"],
+    "metadata_df"
+)
+
+
+# ------------------------------------------------------------
+# Display loaded results
+# ------------------------------------------------------------
+
+print("=" * 70)
+print("MODULE 08 — INTELLIGENCE DELIVERY")
+print("=" * 70)
+
+print(f"Project directory : {PROJECT_DIR}")
+print(f"Results directory : {RESULTS_DIR}")
+
+print("\nControl comparison:")
+display(comparison_df)
+
+print("\nExperiment metadata:")
+display(metadata_df)
+
+print("\nModule 08 Cell 01 completed successfully.")
+
+
+# ============================================================
+# CELL 02 — CONTROL PERFORMANCE COMPARISON
+# ============================================================
+
+POLICY_LABELS = {
+    "fixed_time": "Fixed-Time",
+    "cyclic": "Cyclic",
+    "multi_agent_heuristic": "Multi-Agent Heuristic"
+}
+
+
+display_df = comparison_df.copy()
+
+display_df["policy_name"] = (
+    display_df["policy"]
+    .map(POLICY_LABELS)
+    .fillna(display_df["policy"])
+)
+
+
+fig, ax = plt.subplots(figsize=(10, 6))
+
+x = np.arange(len(display_df))
+width = 0.55
+
+bars = ax.bar(
+    x,
+    display_df["average_queue"],
+    width=width,
+    label="Average Queue"
+)
+
+ax.set_title(
+    "Urban Mobility Control Performance",
+    fontsize=16,
+    fontweight="bold"
+)
+
+ax.set_ylabel("Average Queue Length")
+
+ax.set_xticks(x)
+ax.set_xticklabels(display_df["policy_name"])
+
+ax.grid(
+    axis="y",
+    alpha=0.25
+)
+
+for bar, value in zip(
+    bars,
+    display_df["average_queue"]
+):
+    ax.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + 0.002,
+        f"{value:.3f}",
+        ha="center",
+        va="bottom",
+        fontsize=11
+    )
+
+ax.legend()
+
+plt.tight_layout()
+
+
+figure_path = (
+    RESULTS_DIR /
+    "module_08_control_performance.png"
+)
+
+plt.savefig(
+    figure_path,
+    dpi=200,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+print(f"Figure saved to: {figure_path}")
+print("Module 08 Cell 02 completed successfully.")
+
+
+# ============================================================
+# CELL 03 — FINAL CONTROL METRICS SUMMARY
+# ============================================================
+
+summary_metrics = comparison_df[
+    [
+        "policy",
+        "average_queue",
+        "maximum_queue",
+        "average_waiting_time",
+        "maximum_waiting_time",
+        "average_vehicles",
+        "peak_vehicles"
+    ]
+].copy()
+
+
+summary_metrics["policy"] = (
+    summary_metrics["policy"]
+    .map(POLICY_LABELS)
+    .fillna(summary_metrics["policy"])
+)
+
+
+numeric_columns = summary_metrics.columns[1:]
+
+summary_metrics[numeric_columns] = (
+    summary_metrics[numeric_columns]
+    .round(3)
+)
+
+
+print("=" * 70)
+print("FINAL CONTROL PERFORMANCE SUMMARY")
+print("=" * 70)
+
+display(summary_metrics)
+
+
+summary_file = (
+    RESULTS_DIR /
+    "module_08_final_metrics_summary.csv"
+)
+
+summary_metrics.to_csv(
+    summary_file,
+    index=False
+)
+
+print(f"\nSummary saved to: {summary_file}")
+print("Module 08 Cell 03 completed successfully.")
+
+
+# ============================================================
+# CELL 04 — PROJECT KPI DASHBOARD
+# ============================================================
+
+# These are project-level structural facts established by
+# Modules 01–07. They are presentation metadata rather than
+# claims of trained ML/RL performance.
+
+PROJECT_KPIS = {
+    "Traffic Observations": "34,272",
+    "Traffic Sensors": "207",
+    "Graph Nodes": "207",
+    "Graph Edges": "1,722",
+    "SUMO Intersections": "4",
+    "Simulation Steps": "1,000",
+    "Control Policies": "3",
+    "Signal Agents": "4"
+}
+
+
+fig, ax = plt.subplots(figsize=(14, 7))
+
+ax.axis("off")
+
+fig.suptitle(
+    "Urban Mobility Intelligence & Multi-Agent Traffic Control",
+    fontsize=20,
+    fontweight="bold",
+    y=0.96
+)
+
+fig.text(
+    0.5,
+    0.90,
+    "Project Overview & System Scale",
+    ha="center",
+    fontsize=13
+)
+
+
+positions = [
+    (0.18, 0.68),
+    (0.39, 0.68),
+    (0.61, 0.68),
+    (0.82, 0.68),
+    (0.18, 0.34),
+    (0.39, 0.34),
+    (0.61, 0.34),
+    (0.82, 0.34)
+]
+
+
+for (label, value), (x, y) in zip(
+    PROJECT_KPIS.items(),
+    positions
+):
+
+    ax.text(
+        x,
+        y,
+        value,
+        ha="center",
+        va="center",
+        fontsize=25,
+        fontweight="bold"
+    )
+
+    ax.text(
+        x,
+        y - 0.09,
+        label,
+        ha="center",
+        va="center",
+        fontsize=11
+    )
+
+
+fig.text(
+    0.5,
+    0.08,
+    "METR-LA • Traffic Intelligence • Graph Representation • "
+    "SUMO • TraCI • Multi-Agent Control",
+    ha="center",
+    fontsize=10
+)
+
+
+plt.tight_layout(
+    rect=[0, 0.04, 1, 0.88]
+)
+
+
+kpi_path = (
+    RESULTS_DIR /
+    "module_08_project_kpi_dashboard.png"
+)
+
+plt.savefig(
+    kpi_path,
+    dpi=200,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+print(f"KPI dashboard saved to: {kpi_path}")
+print("Module 08 Cell 04 completed successfully.")
+
+
+# ============================================================
+# CELL 05 — TRAFFIC INTELLIGENCE & GRAPH REPRESENTATION
+# ============================================================
+
+TRAFFIC_OBSERVATIONS = 34272
+TRAFFIC_SENSORS = 207
+GRAPH_NODES = 207
+GRAPH_EDGES = 1722
+
+XGB_MAE = 1.6558
+XGB_RMSE = 6.3002
+
+
+fig, ax = plt.subplots(figsize=(14, 8))
+
+ax.axis("off")
+
+fig.suptitle(
+    "Traffic Intelligence & Graph Representation",
+    fontsize=20,
+    fontweight="bold",
+    y=0.96
+)
+
+fig.text(
+    0.5,
+    0.90,
+    "From real-world traffic observations to a GNN-ready "
+    "network representation",
+    ha="center",
+    fontsize=12
+)
+
+
+boxes = [
+    (
+        0.10,
+        0.58,
+        "METR-LA\nTraffic Data",
+        "34,272 observations"
+    ),
+    (
+        0.30,
+        0.58,
+        "Traffic State\nEngineering",
+        "207 sensors"
+    ),
+    (
+        0.50,
+        0.58,
+        "Temporal ML\nBaseline",
+        "XGBoost"
+    ),
+    (
+        0.70,
+        0.58,
+        "Traffic Network\nGraph",
+        "207 nodes"
+    ),
+    (
+        0.90,
+        0.58,
+        "GNN-Ready\nRepresentation",
+        "1,722 edges"
+    )
+]
+
+
+for x, y, title, subtitle in boxes:
+
+    ax.text(
+        x,
+        y,
+        title,
+        ha="center",
+        va="center",
+        fontsize=13,
+        fontweight="bold",
+        bbox=dict(
+            boxstyle="round,pad=0.8",
+            alpha=0.12
+        )
+    )
+
+    ax.text(
+        x,
+        y - 0.12,
+        subtitle,
+        ha="center",
+        va="center",
+        fontsize=10
+    )
+
+
+arrow_pairs = [
+    (0.16, 0.58, 0.24, 0.58),
+    (0.36, 0.58, 0.44, 0.58),
+    (0.56, 0.58, 0.64, 0.58),
+    (0.76, 0.58, 0.84, 0.58)
+]
+
+
+for x1, y1, x2, y2 in arrow_pairs:
+
+    ax.annotate(
+        "",
+        xy=(x2, y2),
+        xytext=(x1, y1),
+        arrowprops=dict(
+            arrowstyle="->",
+            lw=2
+        )
+    )
+
+
+ax.text(
+    0.50,
+    0.30,
+    "Temporal ML Baseline",
+    ha="center",
+    fontsize=14,
+    fontweight="bold"
+)
+
+
+ax.text(
+    0.38,
+    0.21,
+    f"MAE\n{XGB_MAE:.4f}",
+    ha="center",
+    va="center",
+    fontsize=17,
+    fontweight="bold",
+    bbox=dict(
+        boxstyle="round,pad=0.6",
+        alpha=0.10
+    )
+)
+
+
+ax.text(
+    0.62,
+    0.21,
+    f"RMSE\n{XGB_RMSE:.4f}",
+    ha="center",
+    va="center",
+    fontsize=17,
+    fontweight="bold",
+    bbox=dict(
+        boxstyle="round,pad=0.6",
+        alpha=0.10
+    )
+)
+
+
+ax.text(
+    0.5,
+    0.08,
+    "The graph structure provides the foundation for future "
+    "spatio-temporal GNN and graph-MARL experiments.",
+    ha="center",
+    fontsize=10,
+    wrap=True
+)
+
+
+plt.tight_layout(
+    rect=[0, 0.04, 1, 0.87]
+)
+
+
+intelligence_path = (
+    RESULTS_DIR /
+    "module_08_traffic_intelligence_summary.png"
+)
+
+plt.savefig(
+    intelligence_path,
+    dpi=200,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+print(
+    f"Intelligence summary saved to: "
+    f"{intelligence_path}"
+)
+
+print("Module 08 Cell 05 completed successfully.")
+
+
+# ============================================================
+# CELL 06 — END-TO-END SYSTEM ARCHITECTURE
+# ============================================================
+
+fig, ax = plt.subplots(figsize=(15, 8))
+
+ax.axis("off")
+
+fig.suptitle(
+    "Urban Mobility Intelligence & Multi-Agent Traffic Control",
+    fontsize=20,
+    fontweight="bold",
+    y=0.95
+)
+
+fig.text(
+    0.5,
+    0.90,
+    "End-to-End System Architecture",
+    ha="center",
+    fontsize=13
+)
+
+
+stages = [
+    (
+        "1",
+        "Traffic Data",
+        "METR-LA\n207 sensors"
+    ),
+    (
+        "2",
+        "Traffic State",
+        "Feature engineering\nTemporal patterns"
+    ),
+    (
+        "3",
+        "Prediction",
+        "XGBoost baseline\nGraph representation"
+    ),
+    (
+        "4",
+        "Simulation",
+        "SUMO\n2×2 network"
+    ),
+    (
+        "5",
+        "Decision",
+        "Signal control\nTraCI"
+    ),
+    (
+        "6",
+        "Multi-Agent",
+        "4 signal agents\nLocal + neighbor state"
+    ),
+    (
+        "7",
+        "Evaluation",
+        "Queue\nWaiting time\nTraffic flow"
+    )
+]
+
+
+x_positions = np.linspace(
+    0.08,
+    0.92,
+    len(stages)
+)
+
+y = 0.57
+
+
+for (
+    number,
+    title,
+    subtitle
+), x in zip(
+    stages,
+    x_positions
+):
+
+    ax.text(
+        x,
+        y + 0.08,
+        number,
+        ha="center",
+        va="center",
+        fontsize=15,
+        fontweight="bold",
+        bbox=dict(
+            boxstyle="circle,pad=0.45",
+            alpha=0.15
+        )
+    )
+
+    ax.text(
+        x,
+        y - 0.01,
+        title,
+        ha="center",
+        va="center",
+        fontsize=12,
+        fontweight="bold"
+    )
+
+    ax.text(
+        x,
+        y - 0.10,
+        subtitle,
+        ha="center",
+        va="center",
+        fontsize=9
+    )
+
+
+for i in range(
+    len(x_positions) - 1
+):
+
+    ax.annotate(
+        "",
+        xy=(
+            x_positions[i + 1] - 0.035,
+            y + 0.01
+        ),
+        xytext=(
+            x_positions[i] + 0.035,
+            y + 0.01
+        ),
+        arrowprops=dict(
+            arrowstyle="->",
+            lw=1.8
+        )
+    )
+
+
+# Research feedback loop
+ax.annotate(
+    "Simulation feedback",
+    xy=(0.78, 0.43),
+    xytext=(0.78, 0.25),
+    ha="center",
+    fontsize=10,
+    arrowprops=dict(
+        arrowstyle="->",
+        lw=1.5
+    )
+)
+
+
+ax.annotate(
+    "",
+    xy=(0.43, 0.25),
+    xytext=(0.78, 0.25),
+    arrowprops=dict(
+        arrowstyle="->",
+        lw=1.5
+    )
+)
+
+
+ax.annotate(
+    "Iterative control improvement",
+    xy=(0.43, 0.43),
+    xytext=(0.43, 0.25),
+    ha="center",
+    fontsize=10,
+    arrowprops=dict(
+        arrowstyle="->",
+        lw=1.5
+    )
+)
+
+
+ax.text(
+    0.5,
+    0.08,
+    "Observe → Represent → Predict → Simulate → Decide → "
+    "Coordinate → Evaluate",
+    ha="center",
+    fontsize=13,
+    fontweight="bold"
+)
+
+
+architecture_path = (
+    RESULTS_DIR /
+    "module_08_end_to_end_architecture.png"
+)
+
+plt.tight_layout(
+    rect=[0, 0.04, 1, 0.86]
+)
+
+plt.savefig(
+    architecture_path,
+    dpi=200,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+print(
+    f"Architecture diagram saved to: "
+    f"{architecture_path}"
+)
+
+print("Module 08 Cell 06 completed successfully.")
+
+
+# ============================================================
+# CELL 07 — CONTROL STRATEGY COMPARISON
+# ============================================================
+
+control_plot = comparison_df.copy()
+
+control_plot["Policy"] = (
+    control_plot["policy"]
+    .map(POLICY_LABELS)
+    .fillna(control_plot["policy"])
+)
+
+
+fig, ax = plt.subplots(figsize=(9, 5))
+
+x = np.arange(len(control_plot))
+width = 0.35
+
+
+queue_bars = ax.bar(
+    x - width / 2,
+    control_plot["average_queue"],
+    width,
+    label="Average Queue"
+)
+
+
+waiting_bars = ax.bar(
+    x + width / 2,
+    control_plot["average_waiting_time"],
+    width,
+    label="Average Waiting Time"
+)
+
+
+ax.set_title(
+    "Control Strategy Comparison",
+    fontsize=16,
+    fontweight="bold"
+)
+
+ax.set_ylabel("Metric Value")
+
+ax.set_xticks(x)
+ax.set_xticklabels(control_plot["Policy"])
+
+ax.grid(
+    axis="y",
+    alpha=0.25
+)
+
+ax.legend()
+
+
+for bars in [
+    queue_bars,
+    waiting_bars
+]:
+
+    for bar in bars:
+
+        height = bar.get_height()
+
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + 0.001,
+            f"{height:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9
+        )
+
+
+plt.tight_layout()
+
+
+comparison_path = (
+    RESULTS_DIR /
+    "module_08_control_strategy_comparison.png"
+)
+
+
+plt.savefig(
+    comparison_path,
+    dpi=200,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+print(
+    f"Comparison chart saved to: "
+    f"{comparison_path}"
+)
+
+print("Module 08 Cell 07 completed successfully.")
+
+
+# ============================================================
+# CELL 08 — FINAL PROJECT SUMMARY
+# ============================================================
+
+# ------------------------------------------------------------
+# Extract selected experiment metadata where available
+# ------------------------------------------------------------
+
+metadata_lookup = {}
+
+for _, row in metadata_df.iterrows():
+
+    parameter = str(row["parameter"])
+    value = row["value"]
+
+    metadata_lookup[parameter] = value
+
+
+# ------------------------------------------------------------
+# Final project summary
+# ------------------------------------------------------------
+
+project_summary = {
+    "project":
+        "Urban Mobility Intelligence & Multi-Agent Traffic Control",
+
+    "domain":
+        "Smart Cities / Autonomous Systems / Transportation",
+
+    "dataset":
+        "METR-LA",
+
+    "traffic_observations":
+        TRAFFIC_OBSERVATIONS,
+
+    "traffic_sensors":
+        TRAFFIC_SENSORS,
+
+    "graph_nodes":
+        GRAPH_NODES,
+
+    "graph_edges":
+        GRAPH_EDGES,
+
+    "simulation_environment":
+        "SUMO + TraCI",
+
+    "simulation_network":
+        "2x2 intersection grid",
+
+    "controlled_intersections":
+        4,
+
+    "simulation_steps":
+        metadata_lookup.get(
+            "simulation_steps",
+            1000
+        ),
+
+    "control_policies_evaluated":
+        len(comparison_df),
+
+    "xgboost_mae":
+        XGB_MAE,
+
+    "xgboost_rmse":
+        XGB_RMSE,
+
+    "random_seed":
+        metadata_lookup.get(
+            "random_seed",
+            42
+        ),
+
+    "decision_interval_steps":
+        metadata_lookup.get(
+            "decision_interval",
+            10
+        ),
+
+    "multi_agent_controller":
+        "Decentralized heuristic",
+
+    "trained_marl":
+        False,
+
+    "trained_gnn":
+        False,
+
+    "status":
+        "Implementation complete"
+}
+
+
+summary_df = pd.DataFrame(
+    list(project_summary.items()),
+    columns=["Metric", "Value"]
+)
+
+
+print("=" * 70)
+print("FINAL PROJECT SUMMARY")
+print("=" * 70)
+
+display(summary_df)
+
+
+final_summary_path = (
+    RESULTS_DIR /
+    "module_08_final_project_summary.csv"
+)
+
+
+summary_df.to_csv(
+    final_summary_path,
+    index=False
+)
+
+
+print(
+    f"\nFinal project summary saved to: "
+    f"{final_summary_path}"
+)
+
+print("Module 08 Cell 08 completed successfully.")
+
+
+# ============================================================
+# CELL 09 — FINAL DASHBOARD PACKAGE
+# ============================================================
+
+modules = [
+    (
+        "01 — Data Acquisition & Quality",
+        "Completed",
+        "Validated METR-LA traffic data"
+    ),
+    (
+        "02 — Traffic Intelligence Engine",
+        "Completed",
+        "Traffic-state feature representation"
+    ),
+    (
+        "03 — Spatio-Temporal Learning",
+        "Completed",
+        "XGBoost baseline + traffic-network graph"
+    ),
+    (
+        "04 — Traffic Simulation",
+        "Completed",
+        "SUMO 2x2 controllable environment"
+    ),
+    (
+        "05 — Decision & Control Engine",
+        "Completed",
+        "Single-intersection signal-control loop"
+    ),
+    (
+        "06 — Multi-Agent Control",
+        "Completed",
+        "4-agent decentralized control prototype"
+    ),
+    (
+        "07 — Experimentation & Evaluation",
+        "Completed",
+        "Control-policy benchmarking"
+    ),
+    (
+        "08 — Intelligence Delivery",
+        "Completed",
+        "Presentation-ready project outputs"
+    )
+]
+
+
+dashboard_outputs = pd.DataFrame(
+    modules,
+    columns=[
+        "Module",
+        "Status",
+        "Primary_Output"
+    ]
+)
+
+
+print("=" * 70)
+print("FINAL PROJECT MODULE STATUS")
+print("=" * 70)
+
+display(dashboard_outputs)
+
+
+# ------------------------------------------------------------
+# Generated visual assets
+# ------------------------------------------------------------
+
+assets = [
+    (
+        "Control Performance",
+        "module_08_control_performance.png"
+    ),
+    (
+        "Project KPI Dashboard",
+        "module_08_project_kpi_dashboard.png"
+    ),
+    (
+        "Traffic Intelligence Summary",
+        "module_08_traffic_intelligence_summary.png"
+    ),
+    (
+        "End-to-End Architecture",
+        "module_08_end_to_end_architecture.png"
+    ),
+    (
+        "Control Strategy Comparison",
+        "module_08_control_strategy_comparison.png"
+    )
+]
+
+
+visual_assets = pd.DataFrame(
+    assets,
+    columns=[
+        "Asset",
+        "File"
+    ]
+)
+
+
+print("\nGENERATED VISUAL ASSETS")
+print("-" * 70)
+
+display(visual_assets)
+
+
+# ------------------------------------------------------------
+# Save registries
+# ------------------------------------------------------------
+
+dashboard_file = (
+    RESULTS_DIR /
+    "module_08_dashboard_registry.csv"
+)
+
+assets_file = (
+    RESULTS_DIR /
+    "module_08_visual_assets.csv"
+)
+
+
+dashboard_outputs.to_csv(
+    dashboard_file,
+    index=False
+)
+
+visual_assets.to_csv(
+    assets_file,
+    index=False
+)
+
+
+print("\n" + "=" * 70)
+print("MODULE 08 CELL 09 — SUCCESS")
+print("=" * 70)
+
+print(
+    f"Modules completed       : "
+    f"{len(dashboard_outputs)}"
+)
+
+print(
+    f"Visual assets registered: "
+    f"{len(visual_assets)}"
+)
+
+print(
+    f"\nDashboard registry      : "
+    f"{dashboard_file}"
+)
+
+print(
+    f"Visual asset registry   : "
+    f"{assets_file}"
+)
+
+print("\nModule 08 Cell 09 completed successfully.")
+
+
+# ============================================================
+# CELL 10 — FINAL PROJECT COMPLETION REPORT
+# ============================================================
+
+# ------------------------------------------------------------
+# Pull control metrics for report
+# ------------------------------------------------------------
+
+fixed_policy = comparison_df[
+    comparison_df["policy"] == "fixed_time"
+]
+
+multi_agent_policy = comparison_df[
+    comparison_df["policy"] == "multi_agent_heuristic"
+]
+
+
+if not fixed_policy.empty:
+
+    fixed_avg_queue = float(
+        fixed_policy.iloc[0]["average_queue"]
+    )
+
+    fixed_avg_waiting = float(
+        fixed_policy.iloc[0]["average_waiting_time"]
+    )
+
+else:
+
+    fixed_avg_queue = np.nan
+    fixed_avg_waiting = np.nan
+
+
+if not multi_agent_policy.empty:
+
+    multi_agent_avg_queue = float(
+        multi_agent_policy.iloc[0]["average_queue"]
+    )
+
+    multi_agent_avg_waiting = float(
+        multi_agent_policy.iloc[0]["average_waiting_time"]
+    )
+
+else:
+
+    multi_agent_avg_queue = np.nan
+    multi_agent_avg_waiting = np.nan
+
+
+# ------------------------------------------------------------
+# Build final report
+# ------------------------------------------------------------
+
+final_report = f"""
+============================================================
+URBAN MOBILITY INTELLIGENCE & MULTI-AGENT TRAFFIC CONTROL
+FINAL PROJECT COMPLETION REPORT
+============================================================
+
+PROJECT STATUS
+------------------------------------------------------------
+Implementation status       : COMPLETE
+Modules completed            : 8 / 8
+Dataset                      : METR-LA
+Simulation environment       : SUMO + TraCI
+Simulation network           : 2x2 intersection grid
+Controlled intersections     : 4
+Control policies evaluated   : {len(comparison_df)}
+Simulation steps             : 1000
+Random seed                  : 42
+
+DATA & GRAPH
+------------------------------------------------------------
+Traffic observations         : {TRAFFIC_OBSERVATIONS:,}
+Traffic sensors              : {TRAFFIC_SENSORS}
+Graph nodes                  : {GRAPH_NODES}
+Graph edges                  : {GRAPH_EDGES}
+
+MACHINE LEARNING
+------------------------------------------------------------
+Temporal ML baseline         : XGBoost
+XGBoost MAE                  : {XGB_MAE:.4f}
+XGBoost RMSE                 : {XGB_RMSE:.4f}
+
+Graph status                 : GNN-ready representation
+Trained GNN                  : No
+
+CONTROL & MULTI-AGENT SYSTEM
+------------------------------------------------------------
+Control baseline             : Fixed-time
+Alternative policy           : Cyclic
+Multi-agent policy           : Decentralized heuristic
+Signal agents                : 4
+Decision interval             : 10 simulation steps
+
+MARL STATUS
+------------------------------------------------------------
+MARL infrastructure          : Prepared
+Trained MARL                 : No
+PPO implementation           : No
+MAPPO implementation         : No
+Learned multi-agent policy   : No
+
+The current multi-agent system provides the environment,
+state representation, agent topology, action interface,
+network reward structure, and evaluation framework required
+for future MARL experiments.
+
+CURRENT TECHNICAL SCOPE
+------------------------------------------------------------
+The project contains:
+
+- Real-world traffic observations from METR-LA
+- Traffic-state feature engineering
+- A temporal XGBoost baseline
+- A traffic-network graph representation
+- A GNN-ready graph structure
+- A controllable SUMO traffic environment
+- TraCI-based signal control
+- Decentralized multi-agent signal control
+- Local and neighboring agent observations
+- Network-level queue-based reward evaluation
+- Fixed-time and heuristic control baselines
+- Comparative control-policy evaluation
+- Presentation-ready project outputs
+
+The project does NOT claim:
+
+- Trained PPO performance
+- Trained MARL performance
+- Trained GNN/SOTA spatio-temporal learning
+- A calibrated METR-LA-to-SUMO digital twin
+- Generalized superiority of any control policy
+
+CURRENT BENCHMARK RESULT
+------------------------------------------------------------
+The single-seed 2x2 SUMO prototype produced:
+
+Multi-agent heuristic average queue:
+    {multi_agent_avg_queue:.3f}
+
+Fixed-time average queue:
+    {fixed_avg_queue:.3f}
+
+Multi-agent heuristic average waiting time:
+    {multi_agent_avg_waiting:.3f}
+
+Fixed-time average waiting time:
+    {fixed_avg_waiting:.3f}
+
+These results are prototype benchmark measurements from a
+single simulation seed and should not be interpreted as
+general evidence that the heuristic policy outperforms
+other control strategies.
+
+RESEARCH EXTENSION
+------------------------------------------------------------
+The current architecture is designed to support future work
+such as:
+
+- PPO / IPPO
+- MAPPO
+- Graph-MARL
+- Parameter-sharing multi-agent policies
+- Spatio-temporal GNNs
+- Learned traffic-state representations
+- Larger road networks
+- Multi-seed evaluation
+- More realistic traffic demand
+- Calibrated simulation environments
+
+FINAL PIPELINE
+------------------------------------------------------------
+Traffic Data
+      ↓
+Traffic State Estimation
+      ↓
+Temporal ML + Graph Representation
+      ↓
+SUMO Simulation
+      ↓
+Signal Control
+      ↓
+Multi-Agent Coordination
+      ↓
+Experimentation & Evaluation
+      ↓
+Results & Visualization
+      ↓
+Future MARL / GNN Research
+
+============================================================
+PROJECT IMPLEMENTATION COMPLETE
+============================================================
+"""
+
+
+report_path = (
+    RESULTS_DIR /
+    "module_08_final_project_report.txt"
+)
+
+
+with open(
+    report_path,
+    "w",
+    encoding="utf-8"
+) as file:
+
+    file.write(final_report)
+
+
+print(final_report)
+
+print(
+    f"\nFinal report saved to:\n"
+    f"{report_path}"
+)
+
+print("\n" + "=" * 70)
+print("URBAN MOBILITY PROJECT — IMPLEMENTATION COMPLETE")
+print("=" * 70)
+```
