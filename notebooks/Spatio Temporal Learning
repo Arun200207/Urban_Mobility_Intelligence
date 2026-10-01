@@ -1,0 +1,678 @@
+# ============================================================
+# MODULE 03 — SPATIO-TEMPORAL LEARNING SYSTEM
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+
+# Purpose:
+# Build the project's temporal forecasting baseline and
+# traffic-network graph representation.
+#
+# This module:
+# 1. Validates sensor-level traffic data
+# 2. Builds lagged temporal features
+# 3. Performs a chronological train/test split
+# 4. Trains an XGBoost forecasting baseline
+# 5. Evaluates forecasting performance
+# 6. Loads the traffic sensor graph
+# 7. Converts the graph into PyTorch Geometric format
+# 8. Creates temporal node features
+#
+# Important:
+# XGBoost is used as a temporal ML baseline.
+# The graph representation is GNN-ready, but no GNN is
+# trained in the current implementation.
+
+
+# ============================================================
+# CELL 01 — Imports
+# ============================================================
+
+import numpy as np
+import pandas as pd
+
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+)
+
+from xgboost import XGBRegressor
+
+import torch
+from torch_geometric.data import Data
+
+
+# ============================================================
+# CELL 02 — Validate Required Inputs
+# ============================================================
+
+required_objects = [
+    "sensor_data",
+    "metadata",
+]
+
+missing_objects = [
+    name
+    for name in required_objects
+    if name not in globals()
+]
+
+
+if missing_objects:
+    raise NameError(
+        "The following required objects are missing: "
+        f"{missing_objects}. "
+        "Run Modules 01 and 02 before running Module 03."
+    )
+
+
+if sensor_data.empty:
+    raise ValueError(
+        "sensor_data is empty."
+    )
+
+
+if not isinstance(
+    sensor_data.index,
+    pd.DatetimeIndex
+):
+    raise TypeError(
+        "sensor_data must use a DatetimeIndex."
+    )
+
+
+# ============================================================
+# CELL 03 — Sensor Data Preparation
+# ============================================================
+
+# Module 02 provides sensor_data as the clean sensor-level
+# traffic dataset. Unlike the original implementation, this
+# module does not rely on a hard-coded sensor count such as 207.
+
+sensor_data = sensor_data.copy()
+
+SENSOR_COLS = sensor_data.columns.tolist()
+
+number_of_sensors = len(SENSOR_COLS)
+
+
+print("Sensor data shape:", sensor_data.shape)
+print("Number of sensors:", number_of_sensors)
+
+
+if number_of_sensors == 0:
+    raise ValueError(
+        "No sensor columns were found."
+    )
+
+
+# ============================================================
+# CELL 04 — Build Temporal Forecasting Dataset
+# ============================================================
+
+model_data = pd.DataFrame(
+    index=sensor_data.index
+)
+
+
+# Current network-level traffic state.
+model_data["current"] = (
+    sensor_data.mean(axis=1)
+)
+
+
+# Historical traffic states.
+model_data["lag_1"] = (
+    model_data["current"].shift(1)
+)
+
+model_data["lag_2"] = (
+    model_data["current"].shift(2)
+)
+
+model_data["lag_3"] = (
+    model_data["current"].shift(3)
+)
+
+
+# One-step-ahead forecasting target.
+model_data["target"] = (
+    model_data["current"].shift(-1)
+)
+
+
+# Remove rows that do not have enough historical/future
+# information for supervised learning.
+model_data = model_data.dropna()
+
+
+print("Forecasting dataset shape:", model_data.shape)
+
+display(
+    model_data.head()
+)
+
+
+# ============================================================
+# CELL 05 — Validate Temporal Dataset
+# ============================================================
+
+required_model_columns = [
+    "current",
+    "lag_1",
+    "lag_2",
+    "lag_3",
+    "target",
+]
+
+
+missing_model_columns = [
+    column
+    for column in required_model_columns
+    if column not in model_data.columns
+]
+
+
+if missing_model_columns:
+    raise ValueError(
+        "Missing forecasting columns: "
+        f"{missing_model_columns}"
+    )
+
+
+if model_data.empty:
+    raise ValueError(
+        "No usable observations remain after lag construction."
+    )
+
+
+print(
+    "Temporal feature validation: PASSED"
+)
+
+
+# ============================================================
+# CELL 06 — Chronological Train/Test Split
+# ============================================================
+
+# No random shuffling is used because this is a time-series
+# forecasting problem.
+
+split_index = int(
+    len(model_data) * 0.80
+)
+
+
+train_data = model_data.iloc[
+    :split_index
+].copy()
+
+
+test_data = model_data.iloc[
+    split_index:
+].copy()
+
+
+if train_data.empty or test_data.empty:
+    raise ValueError(
+        "Train/test split produced an empty partition."
+    )
+
+
+# Predictor variables
+FEATURE_COLS = [
+    "lag_1",
+    "lag_2",
+    "lag_3",
+]
+
+
+X_train = train_data[
+    FEATURE_COLS
+]
+
+y_train = train_data[
+    "target"
+]
+
+
+X_test = test_data[
+    FEATURE_COLS
+]
+
+y_test = test_data[
+    "target"
+]
+
+
+print("Chronological split")
+print("-" * 40)
+print("Training samples:", len(X_train))
+print("Testing samples :", len(X_test))
+print(
+    "Training ratio  :",
+    round(
+        len(X_train) / len(model_data),
+        3
+    )
+)
+
+
+# ============================================================
+# CELL 07 — Train XGBoost Baseline
+# ============================================================
+
+xgb_model = XGBRegressor(
+    n_estimators=200,
+    max_depth=6,
+    learning_rate=0.05,
+    objective="reg:squarederror",
+    random_state=42,
+)
+
+
+xgb_model.fit(
+    X_train,
+    y_train,
+)
+
+
+predictions = xgb_model.predict(
+    X_test
+)
+
+
+print(
+    "XGBoost training completed."
+)
+
+
+# ============================================================
+# CELL 08 — Evaluate Forecasting Baseline
+# ============================================================
+
+mae = mean_absolute_error(
+    y_test,
+    predictions,
+)
+
+
+rmse = np.sqrt(
+    mean_squared_error(
+        y_test,
+        predictions,
+    )
+)
+
+
+print("XGBoost Baseline")
+print("-" * 30)
+print("MAE :", mae)
+print("RMSE:", rmse)
+
+
+# Store results in a reusable dictionary.
+forecasting_metrics = {
+    "MAE": float(mae),
+    "RMSE": float(rmse),
+}
+
+
+# ============================================================
+# CELL 09 — Load Traffic Network Metadata
+# ============================================================
+
+if len(metadata) < 3:
+    raise ValueError(
+        "Unexpected metadata structure. "
+        "Expected sensor IDs, sensor mapping, "
+        "and adjacency matrix."
+    )
+
+
+sensor_ids = metadata[0]
+sensor_mapping = metadata[1]
+adjacency_matrix = metadata[2]
+
+
+print("Sensor IDs:", len(sensor_ids))
+print(
+    "Sensor mapping:",
+    len(sensor_mapping)
+)
+print(
+    "Adjacency matrix:",
+    adjacency_matrix.shape
+)
+
+
+# ============================================================
+# CELL 10 — Validate Graph Metadata
+# ============================================================
+
+if len(sensor_ids) != number_of_sensors:
+    raise ValueError(
+        "Sensor ID count does not match "
+        "sensor data column count."
+    )
+
+
+if len(sensor_mapping) != number_of_sensors:
+    raise ValueError(
+        "Sensor mapping size does not match "
+        "sensor data column count."
+    )
+
+
+expected_graph_shape = (
+    number_of_sensors,
+    number_of_sensors,
+)
+
+
+if adjacency_matrix.shape != expected_graph_shape:
+    raise ValueError(
+        "Adjacency matrix shape does not match "
+        "the number of sensors."
+    )
+
+
+print(
+    "Graph metadata validation: PASSED"
+)
+
+
+# ============================================================
+# CELL 11 — Analyze Sensor Graph
+# ============================================================
+
+minimum_edge_weight = (
+    adjacency_matrix.min()
+)
+
+maximum_edge_weight = (
+    adjacency_matrix.max()
+)
+
+
+non_zero_edges = int(
+    np.count_nonzero(
+        adjacency_matrix
+    )
+)
+
+
+total_possible_connections = (
+    adjacency_matrix.size
+)
+
+
+graph_density = (
+    non_zero_edges
+    / total_possible_connections
+)
+
+
+print(
+    "Minimum edge weight:",
+    minimum_edge_weight
+)
+
+print(
+    "Maximum edge weight:",
+    maximum_edge_weight
+)
+
+print(
+    "Non-zero connections:",
+    non_zero_edges
+)
+
+print(
+    "Graph density:",
+    graph_density
+)
+
+
+# ============================================================
+# CELL 12 — Convert Graph to PyTorch Geometric
+# ============================================================
+
+# Extract non-zero adjacency entries.
+rows, cols = np.nonzero(
+    adjacency_matrix
+)
+
+
+edge_index = torch.tensor(
+    np.vstack(
+        [rows, cols]
+    ),
+    dtype=torch.long,
+)
+
+
+edge_weight = torch.tensor(
+    adjacency_matrix[
+        rows,
+        cols
+    ],
+    dtype=torch.float,
+)
+
+
+graph = Data(
+    edge_index=edge_index,
+    edge_weight=edge_weight,
+    num_nodes=number_of_sensors,
+)
+
+
+print("PyTorch Geometric graph:")
+print(graph)
+
+
+# ============================================================
+# CELL 13 — Validate Graph Representation
+# ============================================================
+
+assert graph.num_nodes == number_of_sensors
+
+assert (
+    graph.edge_index.shape[0] == 2
+)
+
+assert (
+    graph.edge_index.shape[1]
+    == non_zero_edges
+)
+
+assert (
+    graph.edge_weight.shape[0]
+    == non_zero_edges
+)
+
+
+print(
+    "Graph representation validation: PASSED"
+)
+
+
+# ============================================================
+# CELL 14 — Create Temporal Node Features
+# ============================================================
+
+# Use the latest four time points as the temporal feature
+# sequence for each traffic sensor.
+
+TEMPORAL_WINDOW = 4
+
+
+if len(sensor_data) < TEMPORAL_WINDOW:
+    raise ValueError(
+        "Not enough observations to create "
+        "the temporal node-feature window."
+    )
+
+
+latest = sensor_data.iloc[
+    -TEMPORAL_WINDOW:
+]
+
+
+# Shape:
+#     (number_of_sensors, temporal_window)
+#
+# Example:
+#     (207, 4)
+
+node_features = torch.tensor(
+    latest.values.T,
+    dtype=torch.float,
+)
+
+
+print(
+    "Node feature shape:",
+    tuple(node_features.shape)
+)
+
+
+# ============================================================
+# CELL 15 — Validate Node Features
+# ============================================================
+
+expected_node_feature_shape = (
+    number_of_sensors,
+    TEMPORAL_WINDOW,
+)
+
+
+if tuple(
+    node_features.shape
+) != expected_node_feature_shape:
+
+    raise ValueError(
+        "Unexpected node feature shape. "
+        f"Expected {expected_node_feature_shape}, "
+        f"got {tuple(node_features.shape)}."
+    )
+
+
+print(
+    "Node feature validation: PASSED"
+)
+
+
+# ============================================================
+# CELL 16 — Final Module Summary
+# ============================================================
+
+print("=" * 60)
+print("MODULE 03 — SPATIO-TEMPORAL LEARNING SYSTEM")
+print("=" * 60)
+
+print("\nTemporal Forecasting")
+print("-" * 40)
+print(
+    "Training samples   :",
+    len(X_train)
+)
+print(
+    "Testing samples    :",
+    len(X_test)
+)
+print(
+    "Features used      :",
+    ", ".join(FEATURE_COLS)
+)
+print(
+    "XGBoost MAE        :",
+    round(mae, 4)
+)
+print(
+    "XGBoost RMSE       :",
+    round(rmse, 4)
+)
+
+print("\nTraffic Network Graph")
+print("-" * 40)
+print(
+    "Graph nodes        :",
+    graph.num_nodes
+)
+print(
+    "Graph edges        :",
+    graph.edge_index.shape[1]
+)
+print(
+    "Graph density      :",
+    round(graph_density, 6)
+)
+
+print("\nNode Representation")
+print("-" * 40)
+print(
+    "Temporal window    :",
+    TEMPORAL_WINDOW
+)
+print(
+    "Node feature shape :",
+    tuple(node_features.shape)
+)
+
+print("\nArchitecture Status")
+print("-" * 40)
+print(
+    "Temporal ML        : XGBoost baseline"
+)
+print(
+    "Graph representation: PyTorch Geometric"
+)
+print(
+    "GNN training       : Not implemented"
+)
+print(
+    "GNN status         : GNN-ready"
+)
+
+print("\n" + "=" * 60)
+print("MODULE 03 COMPLETED SUCCESSFULLY")
+print("=" * 60)
+
+
+# ============================================================
+# FINAL OUTPUT OBJECTS
+# ============================================================
+#
+# sensor_data
+#     Clean sensor-level traffic observations.
+#
+# model_data
+#     Temporal forecasting dataset.
+#
+# train_data / test_data
+#     Chronological training and testing partitions.
+#
+# X_train / X_test
+#     Forecasting input features.
+#
+# y_train / y_test
+#     Forecasting targets.
+#
+# xgb_model
+#     Trained XGBoost baseline.
+#
+# predictions
+#     Test-set predictions.
+#
+# forecasting_metrics
+#     MAE and RMSE.
+#
+# graph
+#     PyTorch Geometric traffic network.
+#
+# node_features
+#     Latest four traffic observations per sensor.
+#
+# These objects remain available for downstream modules.
+# ============================================================
