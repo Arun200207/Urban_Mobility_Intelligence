@@ -1,0 +1,613 @@
+# ============================================================
+# MODULE 04 — TRAFFIC DIGITAL TWIN SYSTEM
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+
+# Purpose:
+# Create a lightweight SUMO traffic simulation environment
+# that acts as a controllable digital-twin-style prototype.
+#
+# This module:
+# 1. Installs / configures SUMO in Google Colab
+# 2. Creates a 2 × 2 traffic-light-controlled grid
+# 3. Generates reproducible traffic demand
+# 4. Creates a SUMO configuration
+# 5. Runs the simulation through TraCI
+# 6. Collects network-level vehicle statistics
+# 7. Reports simulation performance
+#
+# Important:
+# This is a simulation prototype, not a calibrated replica
+# of the METR-LA road network.
+
+
+# ============================================================
+# CELL 01 — SUMO Installation
+# ============================================================
+
+import os
+import sys
+import subprocess
+import shutil
+from pathlib import Path
+
+
+# Install SUMO when running in Google Colab.
+# Outside Colab, SUMO is expected to already be installed.
+
+if "google.colab" in sys.modules:
+
+    print("Google Colab detected.")
+    print("Installing SUMO...")
+
+    subprocess.run(
+        [
+            "apt-get",
+            "-qq",
+            "update",
+        ],
+        check=True,
+    )
+
+    subprocess.run(
+        [
+            "apt-get",
+            "-qq",
+            "install",
+            "sumo",
+            "sumo-tools",
+        ],
+        check=True,
+    )
+
+    print("SUMO installation completed.")
+
+else:
+
+    print(
+        "Google Colab not detected."
+    )
+
+    print(
+        "Assuming SUMO is already installed."
+    )
+
+
+# ============================================================
+# CELL 02 — SUMO Environment Configuration
+# ============================================================
+
+SUMO_HOME = os.environ.get(
+    "SUMO_HOME",
+    "/usr/share/sumo",
+)
+
+
+if not Path(SUMO_HOME).exists():
+
+    raise FileNotFoundError(
+        f"SUMO installation not found at: {SUMO_HOME}\n"
+        "Install SUMO or set the SUMO_HOME environment variable."
+    )
+
+
+os.environ["SUMO_HOME"] = SUMO_HOME
+
+
+SUMO_TOOLS = Path(SUMO_HOME) / "tools"
+
+
+if str(SUMO_TOOLS) not in sys.path:
+
+    sys.path.append(
+        str(SUMO_TOOLS)
+    )
+
+
+# Verify required SUMO executables.
+required_executables = [
+    "sumo",
+    "netgenerate",
+]
+
+
+for executable in required_executables:
+
+    executable_path = shutil.which(
+        executable
+    )
+
+    if executable_path is None:
+
+        raise FileNotFoundError(
+            f"Required SUMO executable not found: "
+            f"{executable}"
+        )
+
+
+import traci
+
+
+print("SUMO_HOME:", SUMO_HOME)
+print("SUMO tools:", SUMO_TOOLS)
+print("SUMO + TraCI ready.")
+
+
+# ============================================================
+# CELL 03 — Project / SUMO Directory
+# ============================================================
+
+if "PROJECT_DIR" not in globals():
+
+    PROJECT_DIR = Path.cwd()
+
+
+SUMO_DIR = (
+    PROJECT_DIR
+    / "sumo"
+)
+
+
+SUMO_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+print(
+    "SUMO project directory:",
+    SUMO_DIR,
+)
+
+
+# ============================================================
+# CELL 04 — Simulation Configuration
+# ============================================================
+
+GRID_SIZE = 2
+GRID_LENGTH = 300
+
+SIMULATION_END = 1000
+
+TRAFFIC_PERIOD = 5
+
+RANDOM_SEED = 42
+
+
+print("Simulation configuration")
+print("-" * 40)
+
+print("Grid size        :", f"{GRID_SIZE} × {GRID_SIZE}")
+print("Grid length      :", f"{GRID_LENGTH} m")
+print("Simulation end   :", SIMULATION_END)
+print("Traffic period   :", TRAFFIC_PERIOD)
+print("Random seed      :", RANDOM_SEED)
+
+
+# ============================================================
+# CELL 05 — Generate SUMO Road Network
+# ============================================================
+
+network_file = (
+    SUMO_DIR
+    / "urban_grid.net.xml"
+)
+
+
+network_command = [
+    "netgenerate",
+    "--grid",
+    f"--grid.number={GRID_SIZE}",
+    f"--grid.length={GRID_LENGTH}",
+    "--default-junction-type=traffic_light",
+    "--output-file",
+    str(network_file),
+]
+
+
+network_result = subprocess.run(
+    network_command,
+    check=True,
+    capture_output=True,
+    text=True,
+)
+
+
+if not network_file.exists():
+
+    raise FileNotFoundError(
+        "SUMO network file was not created."
+    )
+
+
+print(
+    "Network created:",
+    network_file.name,
+)
+
+
+# ============================================================
+# CELL 06 — Generate Reproducible Traffic Demand
+# ============================================================
+
+route_file = (
+    SUMO_DIR
+    / "traffic.rou.xml"
+)
+
+
+random_trips_script = (
+    Path(SUMO_HOME)
+    / "tools"
+    / "randomTrips.py"
+)
+
+
+if not random_trips_script.exists():
+
+    raise FileNotFoundError(
+        "SUMO randomTrips.py was not found."
+    )
+
+
+route_command = [
+    "python",
+    str(random_trips_script),
+    "-n",
+    str(network_file),
+    "-r",
+    str(route_file),
+    "-e",
+    str(SIMULATION_END),
+    "--period",
+    str(TRAFFIC_PERIOD),
+    "--seed",
+    str(RANDOM_SEED),
+]
+
+
+subprocess.run(
+    route_command,
+    check=True,
+)
+
+
+if not route_file.exists():
+
+    raise FileNotFoundError(
+        "SUMO route file was not created."
+    )
+
+
+print(
+    "Traffic routes created:",
+    route_file.name,
+)
+
+
+# ============================================================
+# CELL 07 — Create SUMO Configuration
+# ============================================================
+
+config_file = (
+    SUMO_DIR
+    / "simulation.sumocfg"
+)
+
+
+config_text = f"""<configuration>
+    <input>
+        <net-file value="{network_file.name}"/>
+        <route-files value="{route_file.name}"/>
+    </input>
+
+    <time>
+        <begin value="0"/>
+        <end value="{SIMULATION_END}"/>
+    </time>
+</configuration>
+"""
+
+
+config_file.write_text(
+    config_text
+)
+
+
+if not config_file.exists():
+
+    raise FileNotFoundError(
+        "SUMO configuration file was not created."
+    )
+
+
+print(
+    "SUMO configuration created:",
+    config_file.name,
+)
+
+
+# ============================================================
+# CELL 08 — Start SUMO Through TraCI
+# ============================================================
+
+sumo_command = [
+    "sumo",
+    "-c",
+    str(config_file),
+    "--start",
+    "--quit-on-end",
+]
+
+
+vehicle_counts = []
+
+simulation_steps = 0
+
+
+print(
+    "Starting SUMO simulation..."
+)
+
+
+try:
+
+    traci.start(
+        sumo_command
+    )
+
+
+    # --------------------------------------------------------
+    # Run simulation
+    # --------------------------------------------------------
+
+    while (
+        traci.simulation
+        .getMinExpectedNumber()
+        > 0
+    ):
+
+        traci.simulationStep()
+
+        simulation_steps += 1
+
+        vehicle_counts.append(
+            traci.vehicle.getIDCount()
+        )
+
+
+    print(
+        "Simulation completed successfully."
+    )
+
+
+finally:
+
+    # Always close TraCI, including when an exception occurs.
+    try:
+        traci.close()
+    except Exception:
+        pass
+
+
+# ============================================================
+# CELL 09 — Validate Simulation Output
+# ============================================================
+
+if not vehicle_counts:
+
+    raise RuntimeError(
+        "SUMO completed without producing "
+        "vehicle-count observations."
+    )
+
+
+if simulation_steps != len(
+    vehicle_counts
+):
+
+    raise RuntimeError(
+        "Simulation-step count does not match "
+        "vehicle-count observations."
+    )
+
+
+print(
+    "Simulation output validation: PASSED"
+)
+
+
+# ============================================================
+# CELL 10 — Calculate Digital Twin Metrics
+# ============================================================
+
+mean_vehicles = (
+    sum(vehicle_counts)
+    / len(vehicle_counts)
+)
+
+
+peak_vehicles = max(
+    vehicle_counts
+)
+
+
+minimum_vehicles = min(
+    vehicle_counts
+)
+
+
+digital_twin_metrics = {
+    "simulation_steps": int(
+        simulation_steps
+    ),
+    "average_vehicles": float(
+        mean_vehicles
+    ),
+    "peak_vehicles": int(
+        peak_vehicles
+    ),
+    "minimum_vehicles": int(
+        minimum_vehicles
+    ),
+    "grid_size": GRID_SIZE,
+    "grid_length_m": GRID_LENGTH,
+    "traffic_period": TRAFFIC_PERIOD,
+    "random_seed": RANDOM_SEED,
+}
+
+
+# ============================================================
+# CELL 11 — Display Simulation Results
+# ============================================================
+
+print("=" * 60)
+print("TRAFFIC DIGITAL TWIN RESULTS")
+print("=" * 60)
+
+print("\nSimulation")
+print("-" * 40)
+
+print(
+    "Network             :",
+    f"{GRID_SIZE} × {GRID_SIZE} intersection grid",
+)
+
+print(
+    "Grid length         :",
+    f"{GRID_LENGTH} m",
+)
+
+print(
+    "Simulation steps    :",
+    simulation_steps,
+)
+
+print(
+    "Traffic period      :",
+    f"{TRAFFIC_PERIOD} steps",
+)
+
+print(
+    "Random seed         :",
+    RANDOM_SEED,
+)
+
+
+print("\nTraffic statistics")
+print("-" * 40)
+
+print(
+    "Average vehicles    :",
+    round(mean_vehicles, 2),
+)
+
+print(
+    "Peak vehicles       :",
+    peak_vehicles,
+)
+
+print(
+    "Minimum vehicles    :",
+    minimum_vehicles,
+)
+
+
+# ============================================================
+# CELL 12 — Final Module Summary
+# ============================================================
+
+print("\n" + "=" * 60)
+print("MODULE 04 — TRAFFIC DIGITAL TWIN SYSTEM")
+print("=" * 60)
+
+print("\nEnvironment")
+print("-" * 40)
+print("Simulator           : SUMO")
+print("Control interface   : TraCI")
+print(
+    "Network             :",
+    f"{GRID_SIZE} × {GRID_SIZE} grid",
+)
+print(
+    "Controlled junctions:",
+    GRID_SIZE ** 2,
+)
+
+print("\nSimulation")
+print("-" * 40)
+print(
+    "Simulation steps    :",
+    simulation_steps,
+)
+print(
+    "Average vehicles    :",
+    round(mean_vehicles, 2),
+)
+print(
+    "Peak vehicles       :",
+    peak_vehicles,
+)
+
+print("\nReproducibility")
+print("-" * 40)
+print(
+    "Random seed         :",
+    RANDOM_SEED,
+)
+print(
+    "Traffic period      :",
+    TRAFFIC_PERIOD,
+)
+
+print("\nArchitecture status")
+print("-" * 40)
+print(
+    "SUMO simulation     : READY"
+)
+print(
+    "TraCI interface     : READY"
+)
+print(
+    "Signalized network  : READY"
+)
+print(
+    "Control experiments : READY"
+)
+
+print("\nScope note")
+print("-" * 40)
+print(
+    "This environment is a lightweight traffic simulation "
+    "prototype and is not a calibrated replica of METR-LA."
+)
+
+print("\n" + "=" * 60)
+print("MODULE 04 COMPLETED SUCCESSFULLY")
+print("=" * 60)
+
+
+# ============================================================
+# FINAL OUTPUT OBJECTS
+# ============================================================
+#
+# SUMO_DIR
+#     Directory containing SUMO simulation files.
+#
+# network_file
+#     Generated 2 × 2 traffic-light-controlled network.
+#
+# route_file
+#     Reproducible random traffic demand.
+#
+# config_file
+#     SUMO simulation configuration.
+#
+# vehicle_counts
+#     Number of active vehicles at each simulation step.
+#
+# digital_twin_metrics
+#     Summary statistics for the simulation.
+#
+# These objects remain available for downstream modules.
+# ============================================================
