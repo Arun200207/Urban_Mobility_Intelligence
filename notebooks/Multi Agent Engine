@@ -1,0 +1,866 @@
+```python
+# ============================================================
+# MODULE 06 — MULTI-AGENT INTELLIGENCE ENGINE
+# Urban Mobility Intelligence & Multi-Agent Traffic Control
+# ============================================================
+#
+# Purpose:
+#   Extend the single-intersection control environment into a
+#   decentralized multi-agent traffic-signal control system.
+#
+# Current implementation:
+#   - One agent per traffic signal
+#   - Local state: lane queue + lane waiting time
+#   - Neighbor state: nearby traffic-signal observations
+#   - Agent relationships: spatial proximity graph
+#   - Action: traffic-signal phase selection
+#   - Reward: negative total network queue
+#   - Policy: deterministic decentralized phase cycling
+#
+# IMPORTANT:
+#   This module implements a MARL-ready architecture.
+#   It does NOT train a reinforcement-learning/MARL policy.
+#
+# Future extension:
+#   Replace the deterministic action policy with PPO, MAPPO,
+#   graph-based MARL, or another learned multi-agent controller.
+#
+# ============================================================
+
+
+# ============================================================
+# 1. IMPORTS & CONFIGURATION
+# ============================================================
+
+import os
+import sys
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+# ------------------------------------------------------------
+# Project paths
+# ------------------------------------------------------------
+
+if "PROJECT_DIR" in globals():
+    PROJECT_DIR = Path(PROJECT_DIR)
+else:
+    PROJECT_DIR = Path("/content/drive/MyDrive/Urban_Mobility_Project")
+
+SUMO_DIR = PROJECT_DIR / "sumo"
+CONFIG_FILE = SUMO_DIR / "simulation.sumocfg"
+
+print("Project directory:", PROJECT_DIR)
+print("SUMO directory:", SUMO_DIR)
+print("SUMO configuration:", CONFIG_FILE)
+
+
+# ------------------------------------------------------------
+# Validate project files
+# ------------------------------------------------------------
+
+if not SUMO_DIR.exists():
+    raise FileNotFoundError(
+        f"SUMO directory does not exist: {SUMO_DIR}"
+    )
+
+if not CONFIG_FILE.exists():
+    raise FileNotFoundError(
+        f"SUMO configuration file not found: {CONFIG_FILE}"
+    )
+
+
+# ------------------------------------------------------------
+# Validate SUMO executable
+# ------------------------------------------------------------
+
+if shutil.which("sumo") is None:
+    raise FileNotFoundError(
+        "SUMO executable was not found in PATH. "
+        "Install SUMO before running Module 06."
+    )
+
+
+# ------------------------------------------------------------
+# Configure SUMO Python tools
+# ------------------------------------------------------------
+
+SUMO_HOME = os.environ.get("SUMO_HOME", "/usr/share/sumo")
+
+if Path(SUMO_HOME).exists():
+
+    SUMO_TOOLS = Path(SUMO_HOME) / "tools"
+
+    if str(SUMO_TOOLS) not in sys.path:
+        sys.path.append(str(SUMO_TOOLS))
+
+
+# ------------------------------------------------------------
+# Import TraCI
+# ------------------------------------------------------------
+
+try:
+    import traci
+except ImportError as exc:
+    raise ImportError(
+        "TraCI could not be imported. "
+        "Verify that SUMO and its Python tools are installed."
+    ) from exc
+
+
+# ============================================================
+# 2. MULTI-AGENT CONFIGURATION
+# ============================================================
+
+EPISODE_STEPS = 200
+
+# Maximum distance used to connect nearby intersections.
+#
+# The 2 × 2 SUMO network generated in Module 04 uses
+# 300 m spacing, so 350 m connects spatially adjacent
+# intersections without requiring a hard-coded agent count.
+NEIGHBOR_DISTANCE_THRESHOLD = 350.0
+
+RANDOM_SEED = 42
+
+np.random.seed(RANDOM_SEED)
+
+print("\nMulti-agent configuration")
+print("-------------------------")
+print("Episode steps:", EPISODE_STEPS)
+print(
+    "Neighbor distance threshold:",
+    NEIGHBOR_DISTANCE_THRESHOLD,
+    "m"
+)
+print("Random seed:", RANDOM_SEED)
+
+
+# ============================================================
+# 3. START SUMO
+# ============================================================
+
+sumo_cmd = [
+    "sumo",
+    "-c",
+    str(CONFIG_FILE),
+    "--start",
+    "--quit-on-end",
+]
+
+print("\nStarting SUMO...")
+
+try:
+    traci.start(sumo_cmd)
+    print("SUMO started successfully.")
+except Exception as exc:
+    raise RuntimeError(
+        "Failed to start SUMO through TraCI."
+    ) from exc
+
+
+# ============================================================
+# 4. DISCOVER TRAFFIC-SIGNAL AGENTS
+# ============================================================
+
+traffic_lights = list(
+    traci.trafficlight.getIDList()
+)
+
+if len(traffic_lights) == 0:
+    traci.close()
+
+    raise RuntimeError(
+        "No traffic-signal agents were found in the SUMO network."
+    )
+
+print("\nTraffic-signal agents:")
+
+for tls_id in traffic_lights:
+    print(" -", tls_id)
+
+print("Number of agents:", len(traffic_lights))
+
+
+# ============================================================
+# 5. CONTROLLED-LANE DISCOVERY
+# ============================================================
+
+def get_controlled_lanes(tls_id):
+    """
+    Return unique lanes controlled by a traffic signal.
+
+    Parameters
+    ----------
+    tls_id : str
+        SUMO traffic-light identifier.
+
+    Returns
+    -------
+    list[str]
+        Unique controlled lane IDs.
+    """
+
+    lanes = []
+
+    controlled_links = (
+        traci.trafficlight.getControlledLinks(tls_id)
+    )
+
+    for links in controlled_links:
+
+        if links is None:
+            continue
+
+        for link in links:
+
+            if link is None:
+                continue
+
+            if len(link) == 0:
+                continue
+
+            lane_id = link[0]
+
+            if lane_id is not None:
+                lanes.append(lane_id)
+
+    # Remove duplicates while preserving order.
+    return list(dict.fromkeys(lanes))
+
+
+# Cache controlled lanes for each agent.
+agent_lanes = {
+    tls_id: get_controlled_lanes(tls_id)
+    for tls_id in traffic_lights
+}
+
+
+# ------------------------------------------------------------
+# Validate lane discovery
+# ------------------------------------------------------------
+
+for tls_id, lanes in agent_lanes.items():
+
+    if len(lanes) == 0:
+        traci.close()
+
+        raise RuntimeError(
+            f"No controlled lanes found for agent '{tls_id}'."
+        )
+
+print("\nControlled lanes per agent:")
+
+for tls_id, lanes in agent_lanes.items():
+    print(
+        f"{tls_id}: {len(lanes)} lanes"
+    )
+
+
+# ============================================================
+# 6. AGENT STATE REPRESENTATION
+# ============================================================
+#
+# Each traffic signal observes:
+#
+#   Local state =
+#       [queue_lane_1 ... queue_lane_n,
+#        waiting_lane_1 ... waiting_lane_n]
+#
+# Queue:
+#   Number of halted vehicles on each controlled lane.
+#
+# Waiting time:
+#   Aggregate lane waiting time reported by SUMO.
+#
+# This state is local to each traffic-signal agent.
+# ============================================================
+
+def get_agent_state(tls_id):
+    """
+    Return the local state observed by one traffic-signal agent.
+
+    State consists of:
+        1. lane queue lengths
+        2. lane waiting times
+
+    Returns
+    -------
+    np.ndarray
+        Float32 state vector.
+    """
+
+    lanes = agent_lanes[tls_id]
+
+    queue = [
+        traci.lane.getLastStepHaltingNumber(lane)
+        for lane in lanes
+    ]
+
+    waiting = [
+        traci.lane.getWaitingTime(lane)
+        for lane in lanes
+    ]
+
+    return np.asarray(
+        queue + waiting,
+        dtype=np.float32
+    )
+
+
+# ------------------------------------------------------------
+# Inspect initial local states
+# ------------------------------------------------------------
+
+agent_states = {
+    tls_id: get_agent_state(tls_id)
+    for tls_id in traffic_lights
+}
+
+print("\nInitial agent states:")
+
+for tls_id, state in agent_states.items():
+
+    print(
+        f"{tls_id}: "
+        f"shape={state.shape}, "
+        f"dimension={len(state)}"
+    )
+
+
+# ============================================================
+# 7. INTERSECTION POSITIONS
+# ============================================================
+#
+# SUMO junction coordinates are used to construct a simple
+# spatial interaction graph between traffic-signal agents.
+# ============================================================
+
+positions = {}
+
+for tls_id in traffic_lights:
+
+    try:
+        positions[tls_id] = (
+            traci.junction.getPosition(tls_id)
+        )
+
+    except Exception as exc:
+        traci.close()
+
+        raise RuntimeError(
+            f"Could not retrieve junction position for "
+            f"agent '{tls_id}'."
+        ) from exc
+
+
+print("\nIntersection positions:")
+
+for tls_id, position in positions.items():
+    print(
+        f"{tls_id} -> "
+        f"({position[0]:.2f}, {position[1]:.2f})"
+    )
+
+
+# ============================================================
+# 8. CONSTRUCT AGENT SPATIAL GRAPH
+# ============================================================
+#
+# Two agents are connected when their intersection distance
+# is within NEIGHBOR_DISTANCE_THRESHOLD.
+#
+# This creates:
+#
+#       agent -> neighboring agents
+#
+# The graph is used to provide neighboring traffic information
+# to each decentralized controller.
+# ============================================================
+
+agent_graph = {}
+
+for tls_a in traffic_lights:
+
+    neighbors = []
+
+    x1, y1 = positions[tls_a]
+
+    for tls_b in traffic_lights:
+
+        if tls_a == tls_b:
+            continue
+
+        x2, y2 = positions[tls_b]
+
+        distance = float(
+            np.sqrt(
+                (x1 - x2) ** 2 +
+                (y1 - y2) ** 2
+            )
+        )
+
+        if distance <= NEIGHBOR_DISTANCE_THRESHOLD:
+            neighbors.append(tls_b)
+
+    agent_graph[tls_a] = neighbors
+
+
+# ------------------------------------------------------------
+# Validate / display graph
+# ------------------------------------------------------------
+
+print("\nMulti-agent spatial graph:")
+
+for tls_id, neighbors in agent_graph.items():
+
+    print(
+        f"{tls_id} -> "
+        f"{neighbors}"
+    )
+
+
+total_agent_edges = sum(
+    len(neighbors)
+    for neighbors in agent_graph.values()
+)
+
+print(
+    "\nDirected agent relationships:",
+    total_agent_edges
+)
+
+
+# ============================================================
+# 9. MULTI-AGENT STATE REPRESENTATION
+# ============================================================
+#
+# Each agent receives:
+#
+#       local state
+#       +
+#       neighboring states
+#
+# This provides a simple decentralized observation structure.
+#
+# Example:
+#
+#   Agent A
+#       ├── local traffic state
+#       ├── neighbor B state
+#       └── neighbor C state
+#
+# The architecture is compatible with future graph-based
+# policies and parameter-sharing MARL approaches.
+# ============================================================
+
+def get_multi_agent_state(tls_id):
+    """
+    Return the local + neighboring observation for one agent.
+    """
+
+    local_state = get_agent_state(tls_id)
+
+    neighbor_states = []
+
+    for neighbor in agent_graph[tls_id]:
+
+        neighbor_state = get_agent_state(neighbor)
+
+        neighbor_states.append(
+            neighbor_state
+        )
+
+    if len(neighbor_states) > 0:
+
+        neighbor_state = np.concatenate(
+            neighbor_states
+        )
+
+    else:
+
+        neighbor_state = np.array(
+            [],
+            dtype=np.float32
+        )
+
+    return np.concatenate(
+        [
+            local_state,
+            neighbor_state
+        ]
+    )
+
+
+# ------------------------------------------------------------
+# Inspect combined observations
+# ------------------------------------------------------------
+
+multi_states = {
+    tls_id: get_multi_agent_state(tls_id)
+    for tls_id in traffic_lights
+}
+
+print("\nCombined multi-agent observations:")
+
+for tls_id, state in multi_states.items():
+
+    print(
+        f"{tls_id}: "
+        f"shape={state.shape}, "
+        f"dimension={len(state)}"
+    )
+
+
+# ============================================================
+# 10. ACTION SPACE
+# ============================================================
+#
+# Each traffic-signal agent independently selects a phase from
+# its own available SUMO signal program.
+#
+# The current policy is deliberately simple:
+#
+#       action = step % number_of_phases
+#
+# This is a deterministic baseline, NOT a trained policy.
+# ============================================================
+
+def get_number_of_phases(tls_id):
+    """
+    Return the number of available phases for an agent.
+    """
+
+    program_logics = (
+        traci.trafficlight.getAllProgramLogics(
+            tls_id
+        )
+    )
+
+    if len(program_logics) == 0:
+        raise RuntimeError(
+            f"No signal program found for agent '{tls_id}'."
+        )
+
+    phases = program_logics[0].getPhases()
+
+    if len(phases) == 0:
+        raise RuntimeError(
+            f"No phases found for agent '{tls_id}'."
+        )
+
+    return len(phases)
+
+
+agent_phase_counts = {
+    tls_id: get_number_of_phases(tls_id)
+    for tls_id in traffic_lights
+}
+
+print("\nAction-space information:")
+
+for tls_id, phase_count in agent_phase_counts.items():
+
+    print(
+        f"{tls_id}: "
+        f"{phase_count} available phases"
+    )
+
+
+def select_action(tls_id, step):
+    """
+    Deterministic baseline action policy.
+
+    The policy cycles through the signal phases.
+    """
+
+    number_of_phases = (
+        agent_phase_counts[tls_id]
+    )
+
+    return step % number_of_phases
+
+
+# ------------------------------------------------------------
+# Initial actions
+# ------------------------------------------------------------
+
+initial_actions = {
+    tls_id: select_action(tls_id, 0)
+    for tls_id in traffic_lights
+}
+
+print("\nInitial decentralized actions:")
+
+for tls_id, action in initial_actions.items():
+
+    print(
+        f"{tls_id} -> phase {action}"
+    )
+
+
+# ============================================================
+# 11. NETWORK REWARD
+# ============================================================
+#
+# Network reward:
+#
+#       reward = - total queue across all agents
+#
+# Lower network queue produces a less-negative reward.
+#
+# This creates a shared network-level objective while each
+# traffic signal still makes its own local action.
+# ============================================================
+
+def get_network_queue():
+    """
+    Calculate total halted vehicles across all agents.
+    """
+
+    total_queue = 0.0
+
+    for tls_id in traffic_lights:
+
+        lanes = agent_lanes[tls_id]
+
+        total_queue += sum(
+            traci.lane.getLastStepHaltingNumber(lane)
+            for lane in lanes
+        )
+
+    return float(total_queue)
+
+
+def get_network_reward():
+    """
+    Return the network-level reward.
+    """
+
+    return -get_network_queue()
+
+
+# ============================================================
+# 12. MULTI-AGENT CONTROL EPISODE
+# ============================================================
+#
+# Every step:
+#
+#   1. Each agent observes local + neighboring traffic.
+#   2. Each agent selects its own signal phase.
+#   3. SUMO advances one simulation step.
+#   4. Network queue is measured.
+#   5. Shared network reward is recorded.
+#
+# This is decentralized execution with a shared objective.
+# ============================================================
+
+episode_rewards = []
+episode_actions = []
+episode_network_queues = []
+
+actual_steps = 0
+
+for step in range(EPISODE_STEPS):
+
+    # --------------------------------------------------------
+    # Stop if SUMO has no vehicles left to simulate.
+    # --------------------------------------------------------
+
+    if traci.simulation.getMinExpectedNumber() <= 0:
+        break
+
+    step_actions = {}
+
+    # --------------------------------------------------------
+    # Each traffic-signal agent makes its own decision.
+    # --------------------------------------------------------
+
+    for tls_id in traffic_lights:
+
+        # Obtain observation.
+        _state = get_multi_agent_state(tls_id)
+
+        # Deterministic baseline action.
+        action = select_action(
+            tls_id,
+            step
+        )
+
+        # Apply local signal action.
+        traci.trafficlight.setPhase(
+            tls_id,
+            action
+        )
+
+        step_actions[tls_id] = action
+
+    # --------------------------------------------------------
+    # Advance the traffic simulation.
+    # --------------------------------------------------------
+
+    traci.simulationStep()
+
+    # --------------------------------------------------------
+    # Evaluate shared network objective.
+    # --------------------------------------------------------
+
+    network_queue = get_network_queue()
+    reward = -float(network_queue)
+
+    episode_actions.append(step_actions)
+    episode_network_queues.append(network_queue)
+    episode_rewards.append(reward)
+
+    actual_steps += 1
+
+
+# ============================================================
+# 13. MULTI-AGENT PERFORMANCE SUMMARY
+# ============================================================
+
+if len(episode_rewards) == 0:
+    raise RuntimeError(
+        "No multi-agent episode rewards were recorded."
+    )
+
+average_reward = float(
+    np.mean(episode_rewards)
+)
+
+total_reward = float(
+    np.sum(episode_rewards)
+)
+
+minimum_reward = float(
+    np.min(episode_rewards)
+)
+
+maximum_reward = float(
+    np.max(episode_rewards)
+)
+
+average_network_queue = float(
+    np.mean(episode_network_queues)
+)
+
+maximum_network_queue = float(
+    np.max(episode_network_queues)
+)
+
+
+# ============================================================
+# 14. COORDINATION DATASET
+# ============================================================
+
+coordination_df = pd.DataFrame(
+    {
+        "step": np.arange(actual_steps),
+        "network_queue": episode_network_queues,
+        "network_reward": episode_rewards,
+    }
+)
+
+print("\nCoordination data:")
+display(coordination_df.head())
+
+
+# ============================================================
+# 15. FINAL METRICS
+# ============================================================
+
+multi_agent_metrics = {
+    "number_of_agents": len(traffic_lights),
+    "episode_steps": actual_steps,
+    "directed_agent_relationships": total_agent_edges,
+    "neighbor_distance_threshold_m": (
+        NEIGHBOR_DISTANCE_THRESHOLD
+    ),
+    "average_network_queue": average_network_queue,
+    "maximum_network_queue": maximum_network_queue,
+    "average_network_reward": average_reward,
+    "total_network_reward": total_reward,
+    "minimum_network_reward": minimum_reward,
+    "maximum_network_reward": maximum_reward,
+    "control_policy": "decentralized_deterministic_phase_cycling",
+    "reward_definition": "negative_total_network_queue",
+    "trained_marl": False,
+}
+
+
+print("\nMulti-agent episode completed.")
+print(
+    "Actual episode steps:",
+    actual_steps
+)
+print(
+    "Average network queue:",
+    round(average_network_queue, 4)
+)
+print(
+    "Maximum network queue:",
+    round(maximum_network_queue, 4)
+)
+print(
+    "Average network reward:",
+    round(average_reward, 4)
+)
+print(
+    "Total network reward:",
+    round(total_reward, 4)
+)
+print(
+    "Minimum network reward:",
+    round(minimum_reward, 4)
+)
+print(
+    "Maximum network reward:",
+    round(maximum_reward, 4)
+)
+
+
+# ============================================================
+# 16. CLEAN UP SUMO / TRACI
+# ============================================================
+
+try:
+    traci.close()
+    print("\nTraCI connection closed successfully.")
+except Exception:
+    pass
+
+
+# ============================================================
+# 17. FINAL MODULE REPORT
+# ============================================================
+
+print("""
+============================================================
+MODULE 06 — MULTI-AGENT INTELLIGENCE ENGINE
+============================================================
+Traffic-signal agents : Multi-agent / one per signal
+Network               : SUMO intersection network
+Agent state           : Local queue + waiting time
+Context state         : Neighboring agent observations
+Agent relationships   : Spatial proximity graph
+Control               : Decentralized signal actions
+Reward                : Negative total network queue
+Simulation            : SUMO + TraCI
+
+Policy status:
+    Current policy    : Deterministic phase cycling
+    Trained MARL      : No
+    MARL architecture : Prepared
+
+Research role:
+    Establishes a decentralized multi-agent control
+    architecture that can later support PPO, MAPPO,
+    graph-based MARL, or parameter-sharing policies.
+
+Module 06 completed successfully.
+============================================================
+""")
+```
